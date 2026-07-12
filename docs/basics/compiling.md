@@ -1,4 +1,11 @@
 @page compiling Installing mk64 Decomp
+
+> **Note (portable cleanup branch):** the instructions below are the
+> upstream N64 decompilation's build documentation, kept for reference.
+> On this branch the active build contract is the host target described
+> in the top-level `README.md` (`make` / `make test`); there is no N64
+> ROM or platform build here.
+
 # Build Instructions
 The build system has the following package requirements:
 

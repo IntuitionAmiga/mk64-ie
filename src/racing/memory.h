@@ -70,7 +70,21 @@ uintptr_t func_802A82AC(s32);
 uintptr_t func_802A8348(s32, s32, s32);
 u8* dma_textures(u8*, u32, u32);
 void func_802A8844(void);
+
+/* Stage 2 course-loading seam: packed display-list unpacking (restored
+ * from the original game) and course vertex conversion from the
+ * big-endian asset form. */
+void displaylist_unpack(uintptr_t* data, uintptr_t finalDisplaylistOffset, u32 arg2);
+void course_vertex_convert(const void* src, u32 count, Vtx* dst, s32 mirror, f32 stretchY);
+extern s32 sGfxSeekPosition;
+extern s32 sPackedSeekPosition;
+
 void unpack_lights(Gfx*, u8*, s8);
+void unpack_vtx1(Gfx*, u8*, s8);
+void unpack_vtx2(Gfx*, u8*, s8);
+void unpack_triangle(Gfx*, u8*, s8);
+void unpack_quadrangle(Gfx*, u8*, s8);
+void unpack_spline_3D(Gfx*, u8*, s8);
 void unpack_displaylist(Gfx*, u8*, s8);
 void unpack_end_displaylist(Gfx*, u8*, s8);
 void unpack_set_geometry_mode(Gfx*, u8*, s8);

@@ -1,7 +1,12 @@
 #ifndef GFX_PC_H
 #define GFX_PC_H
 
-//#include <stdbool.h>
+#include <stdint.h>
+
+#ifndef _LANGUAGE_C
+#define _LANGUAGE_C
+#endif
+#include <PR/gbi.h>
 
 struct GfxRenderingAPI;
 struct GfxWindowManagerAPI;
@@ -22,6 +27,11 @@ struct GfxRenderingAPI *gfx_get_current_rendering_api(void);
 void gfx_start_frame(void);
 void gfx_run(Gfx *commands);
 void gfx_end_frame(void);
+
+/* Mark every cached texture decoded from addr for re-upload. */
+void gfx_texture_cache_invalidate(void *addr);
+/* Drop all cached textures and force full state resubmission. */
+void nuke_everything(void);
 
 #ifdef __cplusplus
 }

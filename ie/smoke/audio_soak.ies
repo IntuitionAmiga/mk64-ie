@@ -1,0 +1,167 @@
+-- Stage 5 audio voice soak: run the full game long enough to verify a
+-- sustained no-error title/attract audio path with observed live voices,
+-- reset handling, frame progress, and continued audio pump progress. Lifecycle
+-- counters are reported for review but are not all deterministic on the
+-- default headless title path.
+--
+-- Run: make ie-audio-soak
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local SFX_EXT_BASE = 0x000F2600
+local SFX_STRIDE = 0x20
+local SFX_CTRL = 0x1C
+
+local BOOT_TIMEOUT_MS = 90000
+local AUDIO_TIMEOUT_MS = 120000
+local SOAK_MIN_MS = 45000
+local SOAK_MAX_MS = 120000
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+local function sfx_status_counts()
+    local playing = 0
+    for ch = 0, 31 do
+        local status = mem.read32(SFX_EXT_BASE + ch * SFX_STRIDE + SFX_CTRL)
+        if status % 2 == 1 then
+            playing = playing + 1
+        end
+    end
+    return playing
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local s = {
+        magic = read_be32(STATUS_ADDR),
+        swaps = read_be32(STATUS_ADDR + 16),
+        polls = read_be32(STATUS_ADDR + 24),
+        pumps = read_be32(STATUS_ADDR + 28),
+        live = read_be32(STATUS_ADDR + 32),
+        max_live = read_be32(STATUS_ADDR + 96),
+        starts = read_be32(STATUS_ADDR + 100),
+        stops = read_be32(STATUS_ADDR + 104),
+        loops = read_be32(STATUS_ADDR + 108),
+        oneshots = read_be32(STATUS_ADDR + 112),
+        synth = read_be32(STATUS_ADDR + 116),
+        finishes = read_be32(STATUS_ADDR + 120),
+        deferred = read_be32(STATUS_ADDR + 124),
+        error_stops = read_be32(STATUS_ADDR + 128),
+        resets = read_be32(STATUS_ADDR + 132),
+        retriggers = read_be32(STATUS_ADDR + 136),
+        oneshot_stops = read_be32(STATUS_ADDR + 140),
+    }
+    s.playing = sfx_status_counts()
+    dbg.resume()
+    dbg.close()
+    return s
+end
+
+local function fail(msg)
+    sys.print("SOAK FAIL: " .. msg)
+    sys.exit(1)
+end
+
+local function delta(now, before, field)
+    return now[field] - before[field]
+end
+
+local deadline = sys.time_ms() + BOOT_TIMEOUT_MS
+local s = sample()
+local coverage_start = s
+while sys.time_ms() < deadline do
+    s = sample()
+    if s.magic == MAGIC and s.swaps >= 3 then
+        break
+    end
+    sys.wait_ms(1000)
+end
+if s.magic ~= MAGIC or s.swaps < 3 then
+    fail(string.format("game did not boot (magic 0x%08X swaps %d)", s.magic, s.swaps))
+end
+
+deadline = sys.time_ms() + AUDIO_TIMEOUT_MS
+while sys.time_ms() < deadline do
+    s = sample()
+    if s.magic == MAGIC and s.pumps > 0 and s.starts > 0 and s.playing > 0 then
+        break
+    end
+    sys.wait_ms(1000)
+end
+if s.magic ~= MAGIC then
+    fail("status block lost during audio wait")
+end
+if s.error_stops > 0 then
+    fail(string.format("SFX trigger/read errors during audio wait (%d)", s.error_stops))
+end
+if s.pumps == 0 or s.starts == 0 or s.playing == 0 then
+    fail(string.format("audio never became live (pumps %d starts %d playing %d)", s.pumps, s.starts, s.playing))
+end
+
+local progress_start = sample()
+local soak_start = sys.time_ms()
+local min_done = soak_start + SOAK_MIN_MS
+deadline = soak_start + SOAK_MAX_MS
+
+while sys.time_ms() < deadline do
+    s = sample()
+    if s.magic ~= MAGIC then
+        fail("status block lost during soak")
+    end
+    if s.error_stops > 0 then
+        fail(string.format("SFX trigger/read errors during soak (%d)", s.error_stops))
+    end
+
+    if sys.time_ms() >= min_done
+        and delta(s, progress_start, "pumps") >= 120
+        and delta(s, progress_start, "swaps") > 0
+        and delta(s, coverage_start, "starts") >= 2
+        and s.max_live >= 2
+        and s.resets >= 1 then
+        break
+    end
+
+    sys.wait_ms(500)
+end
+
+s = sample()
+if delta(s, progress_start, "pumps") < 120 then
+    fail(string.format("voice pump under-covered (%d pumps)", delta(s, progress_start, "pumps")))
+end
+if delta(s, progress_start, "swaps") <= 0 then
+    fail("frame counter stalled during soak")
+end
+if delta(s, coverage_start, "starts") < 2 then
+    fail(string.format("too few voice starts (%d)", delta(s, coverage_start, "starts")))
+end
+if s.max_live < 2 then
+    fail(string.format("max live voice count too low (%d)", s.max_live))
+end
+if s.resets < 1 then
+    fail("audio reset state machine was not observed")
+end
+if s.error_stops > 0 then
+    fail(string.format("SFX trigger/read errors at end (%d)", s.error_stops))
+end
+
+sys.print(string.format(
+    "SOAK PASS: pumps +%d swaps +%d starts +%d loops +%d oneshots +%d finishes +%d oneshot_stops +%d retriggers +%d max_live %d synth +%d resets %d playing %d",
+    delta(s, progress_start, "pumps"),
+    delta(s, progress_start, "swaps"),
+    delta(s, coverage_start, "starts"),
+    delta(s, coverage_start, "loops"),
+    delta(s, coverage_start, "oneshots"),
+    delta(s, coverage_start, "finishes"),
+    delta(s, coverage_start, "oneshot_stops"),
+    delta(s, coverage_start, "retriggers"),
+    s.max_live,
+    delta(s, coverage_start, "synth"),
+    s.resets,
+    s.playing))
+sys.exit(0)

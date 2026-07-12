@@ -1,9 +1,16 @@
 #include "libultra_internal.h"
-#include "sh4zam.h"
+#include <math.h>
 
 void guNormalize(f32* x, f32* y, f32* z) {
-    shz_vec3_t tmp = shz_vec3_normalize((shz_vec3_t) { .x = *x, .y = *y, .z = *z});
-    *x = tmp.x;
-    *y = tmp.y;
-    *z = tmp.z;
+    f32 magSqr = *x * *x + *y * *y + *z * *z;
+    f32 invLen;
+
+    if (magSqr == 0.0f) {
+        return;
+    }
+
+    invLen = 1.0f / sqrtf(magSqr);
+    *x *= invLen;
+    *y *= invLen;
+    *z *= invLen;
 }

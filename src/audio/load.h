@@ -26,7 +26,6 @@ void* dma_sample_data(uintptr_t, u32, s32, u8*);
 void func_800BB030(s32);
 void func_800BB304(struct AudioBankSample*);
 s32 func_800BB388(s32 bankId, s32 instId, s32 arg2);
-void func_800BB43C(ALSeqFile*, u8*, u8);
 void patch_sound(struct AudioBankSound* sound, u8* memBase, u8* offsetBase);
 void func_800BB584(s32);
 void patch_audio_bank(struct AudioBank* mem, u8* offset, u32 numInstruments, u32 numDrums);

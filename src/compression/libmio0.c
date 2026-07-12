@@ -11,7 +11,6 @@
 // defines
 
 #define MIO0_VERSION "0.1"
-#include <kos.h>
 #define GET_BIT(buf, bit) ((buf)[(bit) / 8] & (1 << (7 - ((bit) % 8))))
 
 // decode MIO0 header
@@ -28,6 +27,9 @@ int mio0_decode_header(const unsigned char *buf, mio0_header_t *head)
    return 0;
 }
 extern void gfx_texture_cache_invalidate(void *addr);
+#ifdef IE_GFX_SVC
+extern void ie_gfx_svc_drain_for_write(void);
+#endif
 
 int mio0decode(const unsigned char *in, unsigned char *out) 
 {
@@ -51,6 +53,11 @@ int mio0decode(const unsigned char *in, unsigned char *out)
    }
 #else
    mio0_decode_header(in, &head);
+#endif
+#ifdef IE_GFX_SVC
+   /* The decode overwrites pixels a still-in-flight service frame may
+    * reference; wait for the worker before touching them. */
+   ie_gfx_svc_drain_for_write();
 #endif
    gfx_texture_cache_invalidate(out);
 

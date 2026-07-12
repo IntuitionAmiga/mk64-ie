@@ -1,0 +1,121 @@
+-- PC-sampling profile of the attract demo race across all live CPUs:
+-- main M68K + gfx worker (coproc:M68K) + audio worker (coproc:M68K#1).
+--
+-- One dbg.open() freezes the whole machine, so the three PCs of a
+-- sample are correlated (same frozen instant). Buckets are printed per
+-- CPU; map them with build/ie/game.map (main), build/ie/gfxsvc.map
+-- (worker A, linked at 0x280000) and build/ie/audiosvc.map (worker B,
+-- linked at 0x420000). Freeze overhead depresses absolute fps; the
+-- per-CPU distributions stay valid.
+--
+-- Run: make ie-svc-pc-sample IE_GFX_SVC=1 IE_AUDIO_SVC=1
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634 -- 'MK64'
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@ -- s32 gGamestate; RACING == 4
+
+local RACE_WAIT_TIMEOUT_MS = 480000
+local WARMUP_MIN_SWAPS = 620
+local RACE_LAST_SWAP = 1500
+local SAMPLES = 1200
+local SAMPLE_WAIT_MS = 15
+local BUCKET = 1024
+local TOP = 40
+
+local CPUS = {
+    { name = "main", focus = 0 },
+    { name = "gfx-worker", focus = "coproc:M68K" },
+    { name = "audio-worker", focus = "coproc:M68K#1" },
+}
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function status_sample()
+    local out = {}
+    dbg.open()
+    dbg.freeze()
+    out.status_magic = read_be32(STATUS_ADDR)
+    out.swaps = read_be32(STATUS_ADDR + 16)
+    out.state = read_be32(GAMESTATE_ADDR)
+    dbg.resume()
+    dbg.close()
+    return out
+end
+
+sys.print("SVC PC SAMPLE: waiting for the demo race steady state")
+local deadline = sys.time_ms() + RACE_WAIT_TIMEOUT_MS
+local s = nil
+while sys.time_ms() < deadline do
+    s = status_sample()
+    if s.status_magic == STATUS_MAGIC and s.state == 4
+        and s.swaps >= WARMUP_MIN_SWAPS then
+        break
+    end
+    sys.wait_ms(1000)
+end
+if s == nil or s.status_magic ~= STATUS_MAGIC or s.state ~= 4
+    or s.swaps < WARMUP_MIN_SWAPS then
+    sys.print("SVC PC SAMPLE FAIL: race steady state never reached")
+    sys.exit(1)
+end
+sys.print(string.format("SVC PC SAMPLE: sampling from swap %d", s.swaps))
+
+local buckets = {}
+local taken = {}
+for _, c in ipairs(CPUS) do
+    buckets[c.name] = {}
+    taken[c.name] = 0
+end
+
+local t0 = sys.time_ms()
+for i = 1, SAMPLES do
+    dbg.open()
+    dbg.freeze()
+    for _, c in ipairs(CPUS) do
+        local ok, pc = pcall(function()
+            dbg.cpu_focus(c.focus)
+            return dbg.get_pc()
+        end)
+        if ok and pc ~= nil then
+            local b = math.floor(pc / BUCKET) * BUCKET
+            local t = buckets[c.name]
+            t[b] = (t[b] or 0) + 1
+            taken[c.name] = taken[c.name] + 1
+        end
+    end
+    pcall(function() dbg.cpu_focus(0) end)
+    dbg.resume()
+    dbg.close()
+    sys.wait_ms(SAMPLE_WAIT_MS)
+end
+local elapsed_s = (sys.time_ms() - t0) / 1000.0
+
+s = status_sample()
+if s.state ~= 4 or s.swaps > RACE_LAST_SWAP then
+    sys.print(string.format(
+        "SVC PC SAMPLE WARNING: window left the race (state=%d swaps=%d) - tail samples suspect",
+        s.state, s.swaps))
+end
+
+sys.print(string.format("SVC PC SAMPLE PASS: %d rounds in %.1f s, end swap %d",
+    SAMPLES, elapsed_s, s.swaps))
+for _, c in ipairs(CPUS) do
+    local n = taken[c.name]
+    sys.print(string.format("== %s: %d samples ==", c.name, n))
+    if n > 0 then
+        local sorted = {}
+        for addr, count in pairs(buckets[c.name]) do
+            sorted[#sorted + 1] = { addr = addr, count = count }
+        end
+        table.sort(sorted, function(a, b) return a.count > b.count end)
+        for i = 1, math.min(TOP, #sorted) do
+            local e = sorted[i]
+            sys.print(string.format("%s PC 0x%08X %d (%.1f%%)",
+                c.name, e.addr, e.count, e.count * 100.0 / n))
+        end
+    end
+end
+sys.exit(0)

@@ -9,29 +9,28 @@
 #include "main.h"
 #include "code_800029B0.h"
 #include "math_util.h"
-#include "courses/courseTable.h"
+#include "course_metadata.h"
 #include "defines.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <kos.h>
+#include "platform/platform.h"
 
 extern s16 gCurrentCourseId;
 
 #include "buffer_sizes.h"
 extern uint8_t __attribute__((aligned(32))) COURSE_BUF[COURSE_BUF_SIZE];
 extern uint8_t __attribute__((aligned(32))) UNPACK_BUF[UNPACK_BUF_SIZE];
+extern Gfx __attribute__((aligned(32))) UNPACKED_DL_BUF[UNPACKED_DL_BUF_SIZE / 8];
+extern uint8_t __attribute__((aligned(32))) COURSE_OFFSETS_BUF[COURSE_OFFSETS_BUF_SIZE];
 extern uint8_t __attribute__((aligned(32))) SEG4_BUF[SEG4_BUF_SIZE];
 extern uint8_t __attribute__((aligned(32))) SEG5_BUF[SEG5_BUF_SIZE];
 extern uint8_t __attribute__((aligned(32))) COMP_VERT_BUF[COMP_VERT_BUF_SIZE];
 extern uint8_t __attribute__((aligned(32))) DECOMP_VERT_BUF[DECOMP_VERT_BUF_SIZE];
 
-static char __attribute__((aligned(32))) texfn[256];
-
-s32 sGfxSeekPosition;
-s32 sPackedSeekPosition;
+static char asset_name[256];
 
 struct UnkStruct_802B8CD4 D_802B8CD4[] = { 0 };
 s32 D_802B8CE4 = 0; // pad
@@ -61,57 +60,6 @@ void* get_segment_base_addr(s32 segment) {
     return (void*) (gSegmentTable[segment]);
 }
 
-// borrowed from skmp / DCA3
-// thanks
-extern const char etext[];
-__attribute__((noinline)) void stacktrace() {
-	uint32 sp=0, pr=0;
-	__asm__ __volatile__(
-		"mov	r15,%0\n"
-		"sts	pr,%1\n"
-		: "+r" (sp), "+r" (pr)
-		:
-		: );
-	printf("[ %08X ", (uintptr_t)pr);
-	int found = 0;
-	if(!(sp & 3) && sp > 0x8c000000 && sp < _arch_mem_top) {
-		char** sp_ptr = (char**)sp;
-		for (int so = 0; so < 16384; so++) {
-			if ((uintptr_t)(&sp_ptr[so]) >= _arch_mem_top) {
-				//printf("(@@%08X) ", (uintptr_t)&sp_ptr[so]);
-				break;
-			}
-			if (sp_ptr[so] > (char*)0x8c000000 && sp_ptr[so] < etext) {
-				uintptr_t addr = (uintptr_t)(sp_ptr[so]);
-				// candidate return pointer
-				if (addr & 1) {
-					// dbglog(DBG_CRITICAL, "Stack trace: %p (@%p): misaligned\n", (void*)sp_ptr[so], &sp_ptr[so]);
-					continue;
-				}
-
-				uint16_t* instrp = (uint16_t*)addr;
-
-				uint16_t instr = instrp[-2];
-				// BSR or BSRF or JSR @Rn ?
-				if (((instr & 0xf000) == 0xB000) || ((instr & 0xf0ff) == 0x0003) || ((instr & 0xf0ff) == 0x400B)) {
-					printf("%08X ", (uintptr_t)instrp);
-					if (found++ > 24) {
-						//printf("(@%08X) ", (uintptr_t)&sp_ptr[so]);
-						break;
-					}
-				} else {
-					// dbglog(DBG_CRITICAL, "%p:%04X ", instrp, instr);
-				}
-			} else {
-				// dbglog(DBG_CRITICAL, "Stack trace: %p (@%p): out of range\n", (void*)sp_ptr[so], &sp_ptr[so]);
-			}
-		}
-		printf("]\n");
-	} else {
-		printf("%08x ]\n", (uintptr_t)sp);
-	}
-}
-
 /**
  * @brief converts an RSP segment + offset address to a normal memory address
  */
@@ -119,33 +67,21 @@ void* segmented_to_virtual(const void* addr) {
     uintptr_t uip_addr = (uintptr_t) addr;
 
     /*
-        going from player select to map select hits this for some stuff
-        0x2000 range
-        Sherbet Land has 0x00000004, 0x00000009, 0x0000000b
-        if (uip_addr < 0x02000000) {
-            printf("tried to use NULL-ish addr %08x as segmented addr\n", uip_addr);
-            stacktrace();
-        }
-    */
-
-    if ((uip_addr >= 0x8c010000) && (uip_addr <= 0x8cffffff)) {
-        return uip_addr;
-    }
-
+     * Real-pointer rule: segment ids occupy the top byte and only
+     * 0x00-0x0F are segments. Anything above is an already-virtual
+     * pointer (the IE image, heap, and stack live at 0x10000000+;
+     * the old console port's pointers sat at 0x8Cxxxxxx and stay
+     * covered by the same rule).
+     */
     size_t segment = (uintptr_t) uip_addr >> 24;
 
-    // investigate why this hits on Sherbet Land 4 player attract mode demo
-    /* if (segment < 0x2) {
-        printf("%08x converts to bad segment %02x %08x\n", addr, segment, uip_addr);
-    } */
+    if (segment > 0x0F) {
+        return (void*) uip_addr;
+    }
+
 #if DEBUG
     if (segment > 0xf) {
-        printf("%08x converts to bad segment %02x %08x\n", (uintptr_t) addr, segment, (uintptr_t) uip_addr);
-        printf("\n");
-        stacktrace();
-        printf("\n");
-        while (1) {}
-        exit(-1);
+        platform_fatal("%08x converts to bad segment %02x", (uintptr_t) addr, segment);
     }
 #endif
     /* if (gSegmentTable[segment] == 0) {
@@ -296,7 +232,7 @@ extern uint8_t __attribute__((aligned(32))) OTHER_BUF[OTHER_BUF_SIZE];
 // starting address for this texture DECOMPRESSED is gNextFree
 void mio0decode_noinval(const unsigned char *in, unsigned char *out);
 
-u8* dma_textures(u8 texture[], UNUSED size_t arg1, size_t arg2) {
+u8* dma_textures(u8 texture[], UNUSED u32 arg1, u32 arg2) {
     u8* temp_v0;
     temp_v0 = (u8*) ROVING_SEG3_BUF;
     arg2 = ALIGN16(arg2);
@@ -306,41 +242,10 @@ u8* dma_textures(u8 texture[], UNUSED size_t arg1, size_t arg2) {
 }
 
 void func_802A86A8(CourseVtx* data, u32 arg1) {
-    CourseVtx* courseVtx = data;
-    Vtx* vtx;
-    u32 i;
-    s8 temp_a0;
-    s8 temp_a3;
-    s8 flags;
-
-    vtx = (Vtx*) SEG4_BUF;
-
-    // s32 to u32 comparison required for matching.
-    for (i = 0; i < arg1; i++) {
-        if (gIsMirrorMode) {
-            vtx->v.ob[0] = -courseVtx->ob[0];
-        } else {
-            vtx->v.ob[0] = courseVtx->ob[0];
-        }
-
-        vtx->v.ob[1] = (courseVtx->ob[1] * vtxStretchY);
-        temp_a0 = courseVtx->ca[0];
-        temp_a3 = courseVtx->ca[1];
-
-        flags = temp_a0 & 3;
-        flags |= (temp_a3 << 2) & 0xC;
-
-        vtx->v.ob[2] = courseVtx->ob[2];
-        vtx->v.tc[0] = courseVtx->tc[0];
-        vtx->v.tc[1] = courseVtx->tc[1];
-        vtx->v.cn[0] = (temp_a0 & 0xFC);
-        vtx->v.cn[1] = (temp_a3 & 0xFC);
-        vtx->v.cn[2] = courseVtx->ca[2];
-        vtx->v.flag = flags;
-        vtx->v.cn[3] = 0xFF;
-        vtx++;
-        courseVtx++;
-    }
+    /* The decompressed vertex stream is in ROM byte order (big-endian
+     * 14-byte records); course_vertex_convert owns the byte-order seam
+     * and writes native Vtx records into SEG4_BUF. */
+    course_vertex_convert(data, arg1, (Vtx*) SEG4_BUF, gIsMirrorMode, vtxStretchY);
 }
 void mio0decode_noinval(const unsigned char *in, unsigned char *out);
 
@@ -353,21 +258,9 @@ void decompress_vtx(CourseVtx* arg0, u32 vertexCount, void *target) {
     set_segment_base_addr(4, (void*) SEG4_BUF);
 }
 
-/**
- * Unpacks course packed displaylists by iterating through each byte of the packed file.
- * Each packed displaylist entry has an opcode and any number of arguments.
- * The opcodes range from 0 to 87 which are used to run the relevant unpack function.
- * The file pointer increments when arguments are used. This way,
- * displaylist_unpack will always read an opcode and not an argument by accident.
- *
- * @warning opcodes that do not contain a definition in the switch are ignored. If an undefined opcode
- * contained arguments the unpacker might try to unpack those arguments.
- * This issue is prevented so long as the packed file adheres to correct opcodes and unpack code
- * increments the file pointer the correct number of times.
- */
-void displaylist_unpack(uintptr_t* data) {
-	set_segment_base_addr(0x7, (void*) data);
-}
+/* displaylist_unpack and the unpack_* helpers live in
+ * src/racing/displaylist_unpack.c (restored from the original game for
+ * the ROM-extracted packed streams). */
 
 struct UnkStr_802AA7C8 {
     u8* unk0;
@@ -402,35 +295,22 @@ char __attribute__((aligned(32))) coursenames[20][32] = {
 char *get_course_name(s16 course) {
     return coursenames[course];
 }
-extern char *fnpre;
 
+/*
+ * <course>_tex.bin is the ready-made segment-5 image: every course
+ * texture already mio0-decompressed at the cumulative aligned offset
+ * the course display lists expect (the layout the original game built
+ * on its heap from the segment-9 texture table).
+ */
 void decompress_textures(UNUSED u32* arg0) {
     char *courseName = get_course_name(gCurrentCourseId);
-    sprintf(texfn, "%s/dc_data/%s_tex.bin", fnpre, courseName);
-    FILE *file = fopen(texfn, "rb");
+    sprintf(asset_name, "%s_tex.bin", courseName);
 
-    if (!file) {
-        perror("fopen");
-        exit(-1);
+    if (!platform_asset_read(asset_name, SEG5_BUF, sizeof(SEG5_BUF), NULL)) {
+        platform_fatal("failed to read asset %s", asset_name);
     }
-
-    fseek(file, 0, SEEK_END);
-    long filesize = ftell(file);
-    rewind(file);
-
-    long toread = filesize;
-    long didread = 0;
-
-    while(didread < filesize) {
-        long rv = fread(&SEG5_BUF[didread], 1, toread - didread, file);
-        if (rv == -1) { printf("FILE IS FUCKED\n"); exit(-1); }
-	    toread -= rv;
-    	didread += rv;
-    }
-    fclose(file);
 
     set_segment_base_addr(0x5, (void*)SEG5_BUF);
-    printf("loaded course textures\n");
 }
 
 void mio0decode_noinval(const unsigned char *in, unsigned char *out);
@@ -440,134 +320,67 @@ void* decompress_segments(u8* start, u8 *target) {
     return (void*) target;
 }
 
-/**
- * @brief Loads & DMAs course data. Vtx, textures, displaylists, etc.
- * @param courseId
- */
-u32 packoffs[20] = {
-0x00009754,// g       .data	00000000 d_course_mario_raceway_packed
-0x0000a130,// g       .data	00000000 d_course_choco_mountain_packed
-0x0000e350,// g       .data	00000000 d_course_bowsers_castle_packed
-0x000069f4,// g       .data	00000000 d_course_banshee_boardwalk_packed
-0x00007d54,// g       .data	00000000 d_course_yoshi_valley_packed
-0x00009d88,// g       .data	00000000 d_course_frappe_snowland_packed
-0x0000faec,// g       .data	00000000 d_course_koopa_troopa_beach_packed
-0x0000ec44,// g       .data	00000000 d_course_royal_raceway_packed
-0x00009760,// g       .data	00000000 d_course_luigi_raceway_packed
-0x0000d998,// g       .data	00000000 d_course_moo_moo_farm_packed
-0x0000a75c,// g       .data	00000000 d_course_toads_turnpike_packed
-0x0000b520,// g       .data	00000000 d_course_kalimari_desert_packed
-0x00004924,// g       .data	00000000 d_course_sherbet_land_packed
-0x00005b4c,// g       .data	00000000 d_course_rainbow_road_packed
-0x0000aa08,// g       .data	00000000 d_course_wario_stadium_packed
-0x000018cc,// g       .data	00000000 d_course_block_fort_packed
-0x00001700,// g       .data	00000000 d_course_skyscraper_packed
-0x00000cc0,// g       .data	00000000 d_course_double_deck_packed
-0x0000a4f8,// g       .data	00000000 d_course_dks_jungle_parkway_packed
-0x00001c74,// g       .data	00000000 d_course_big_donut_packed
-};
 extern void nuke_everything(void);
 
-void mute_stream(void);
-void unmute_stream(void);
-
+/**
+ * @brief Loads course data through the neutral asset layout. Vtx,
+ * textures, displaylists, offset tables, etc.
+ *
+ * All per-course values (vertex count, packed displaylist offset, final
+ * displaylist offset, unknown1) come from course_metadata.bin - the
+ * runtime form of the ROM course table - instead of the stale compiled
+ * tables the previous port carried.
+ * @param courseId
+ */
 u8* load_course(s32 courseId) {
-    u32 vertexCount;
-//    mute_stream();
-    nuke_everything();
+    const struct CourseMetadata* metadata = course_metadata_get(courseId);
+    char* courseName;
 
-    vertexCount = gCourseTable[courseId].vertexCount;
+    nuke_everything();
 
     memset(COURSE_BUF, 0, sizeof(COURSE_BUF));
     memset(COMP_VERT_BUF, 0, sizeof(COMP_VERT_BUF));
     memset(DECOMP_VERT_BUF, 0, sizeof(DECOMP_VERT_BUF));
     memset(UNPACK_BUF, 0, sizeof(UNPACK_BUF));
 
-    char *courseName = get_course_name(gCurrentCourseId);
-    // open course data
-    sprintf(texfn, "%s/dc_data/%s_data.bin", fnpre, courseName);
-    //printf("opening %s\n", texfn);
-    FILE *file = fopen(texfn, "rb");
-    if (!file) {
-        perror("fopen");
-        exit(-1);
+    courseName = get_course_name(gCurrentCourseId);
+
+    // course data (display lists, track sections)
+    sprintf(asset_name, "%s_data.bin", courseName);
+    if (!platform_asset_read(asset_name, COURSE_BUF, sizeof(COURSE_BUF), NULL)) {
+        platform_fatal("failed to read asset %s", asset_name);
     }
-
-    fseek(file, 0, SEEK_END);
-    long filesize = ftell(file);
-    //printf("Filesize %d\n", filesize);
-    fseek(file, 0, SEEK_SET);
-
-    long toread = filesize;
-    long didread = 0;
-
-    while (didread < filesize) {
-        long rv = fread(&COURSE_BUF[didread], 1, toread - didread, file);
-        if (rv == -1) {
-            printf("FILE IS FUCKED\n");
-            exit(-1);
-        }
-        toread -= rv;
-        didread += rv;
-    }
-    fclose(file);
-    file = NULL;
-
     set_segment_base_addr(6, COURSE_BUF);
 
-    // get the verts and the packed
-    sprintf(texfn, "%s/dc_data/%s_geography.bin", fnpre, courseName);
-    file = fopen(texfn, "rb");
-    if (!file) {
-        perror("fopen");
-        exit(-1);
+    // segment 9 offset tables (lights, texture table, displaylist tables)
+    sprintf(asset_name, "%s_offsets.bin", courseName);
+    if (!platform_asset_read(asset_name, COURSE_OFFSETS_BUF, sizeof(COURSE_OFFSETS_BUF), NULL)) {
+        platform_fatal("failed to read asset %s", asset_name);
     }
+    set_segment_base_addr(9, COURSE_OFFSETS_BUF);
 
-    fseek(file, 0, SEEK_END);
-    filesize = ftell(file);
-    rewind(file);
-
+    // course geography: compressed vertices followed by packed displaylists
+    sprintf(asset_name, "%s_geography.bin", courseName);
     {
-        long toread = packoffs[gCurrentCourseId];
-        long cvtotal = toread;
-        long didread = 0;
+        size_t got = 0;
+        size_t packed_offset = metadata->packedOffset;
 
-        while (didread < cvtotal) {
-            long rv = fread(&COMP_VERT_BUF[didread], 1, toread - didread, file);
-            if (rv == -1) {
-                printf("FILE IS FUCKED\n");
-                exit(-1);
-            }
-            toread -= rv;
-            didread += rv;
-        }
-    }
-  
-    {
-        long toread = filesize - packoffs[gCurrentCourseId];
-        long cvtotal = toread;
-        long didread = 0;
-
-        while (didread < cvtotal) {
-            long rv = fread(&UNPACK_BUF[didread], 1, toread - didread, file);
-            if (rv == -1) {
-                    printf("FILE IS FUCKED\n");
-                    exit(-1);
-            }
-            toread -= rv;
-            didread += rv;
+        if (!platform_asset_read_range(asset_name, 0, COMP_VERT_BUF, packed_offset, &got) ||
+            got != packed_offset) {
+            platform_fatal("failed to read vertices from asset %s", asset_name);
         }
 
-        fclose(file);
-        file = NULL;
+        if (!platform_asset_read_range(asset_name, packed_offset, UNPACK_BUF, sizeof(UNPACK_BUF), &got)) {
+            platform_fatal("failed to read displaylists from asset %s", asset_name);
+        }
 
         set_segment_base_addr(0xF, (void*) COMP_VERT_BUF);
-        decompress_vtx(COMP_VERT_BUF, vertexCount, DECOMP_VERT_BUF);
+        decompress_vtx((CourseVtx*) COMP_VERT_BUF, metadata->vertexCount, DECOMP_VERT_BUF);
 
-        displaylist_unpack(UNPACK_BUF);
-        //printf("unpack to %08x\n", (uintptr_t*) UNPACK_BUF);
+        displaylist_unpack((uintptr_t*) UNPACK_BUF, metadata->finalDisplaylistOffset,
+                           metadata->unknown1);
+        set_segment_base_addr(0x7, UNPACKED_DL_BUF);
     }
     decompress_textures(0);
-//    unmute_stream();
     return COMP_VERT_BUF;
 }

@@ -1,5 +1,3 @@
-#include <kos.h>
-#include "kos_undef.h"
 
 #include <ultra64.h>
 #include <macros.h>
@@ -11,7 +9,9 @@
 #include "audio/playback.h"
 #include "audio/synthesis.h"
 #include "audio/seqplayer.h"
+#include "audio/seqfile.h"
 #include "audio/port_eu.h"
+#include "asset_endian.h"
 #include <stdio.h>
 #define ALIGN16(val) (((val) + 0xF) & ~0xF)
 
@@ -357,7 +357,8 @@ void func_800BB304(struct AudioBankSample* sample) {
 
         // this is why DK and Toad were broken once sound was implemented
         if (sampleCopySize > 0xffff) {
-            sampleCopySize = __builtin_bswap32(sampleCopySize);
+            /* Field still holds its stored (big-endian) form. */
+            sampleCopySize = asset_be_u32(&sampleCopySize);
         }
 
         sample->loaded = 0x81;
@@ -395,41 +396,27 @@ s32 func_800BB388(s32 bankId, s32 instId, s32 arg2) {
 #endif
 }
 
-// This appears to be a modified version of alSeqFileNew
-// from src/os/alBankNew.c
-// Or maybe its patch_seq_file from SM64's load_sh.c?
-void func_800BB43C(ALSeqFile* f, u8* base, u8 swap) {
-#define PATCH(SRC, BASE, TYPE) SRC = (TYPE) ((u32) SRC + (u32) BASE)
-    int i = 0;
-    for (i = 0; i < f->seqCount; i++) {
-        if (swap)
-            f->seqArray[i].len = __builtin_bswap32(f->seqArray[i].len);
-        if (swap)
-            f->seqArray[i].offset = __builtin_bswap32(f->seqArray[i].offset);
-
-        if (f->seqArray[i].len != 0) {
-            PATCH(f->seqArray[i].offset, base, u8*);
-        }
-    }
-#undef PATCH
-}
+/* The original alSeqFileNew role is filled by al_seq_file_patch in
+ * src/audio/seqfile.c, which reads the stored big-endian form with
+ * explicit byte order (the previous port's variant assumed a
+ * little-endian host and a pre-swapped sequence table). */
 
 void patch_sound(struct AudioBankSound* sound, u8* memBase, u8* offsetBase) {
     struct AudioBankSample* sample = NULL;
     void* patched = NULL;
     u8* mem = NULL;
 #define PATCH(x, base) (patched = (void*) ((uintptr_t) (x) + (uintptr_t) base))
-    sound->sample = __builtin_bswap32(sound->sample);
+    sound->sample = (struct AudioBankSample*)(uintptr_t) asset_be_u32(&sound->sample);
     if (sound->sample != NULL) {
         sample = sound->sample = (struct AudioBankSample*) PATCH(sound->sample, memBase);
         if (sample->loaded == 0) {
-            sample->sampleAddr = __builtin_bswap32(sample->sampleAddr);
+            sample->sampleAddr = (u8*)(uintptr_t) asset_be_u32(&sample->sampleAddr);
             sample->sampleAddr = (u8*) PATCH(sample->sampleAddr, offsetBase);
 
-            sample->loop = __builtin_bswap32(sample->loop);
+            sample->loop = (struct AdpcmLoop*)(uintptr_t) asset_be_u32(&sample->loop);
             sample->loop = (struct AdpcmLoop*) PATCH(sample->loop, memBase);
 
-            sample->book = __builtin_bswap32(sample->book);
+            sample->book = (struct AdpcmBook*)(uintptr_t) asset_be_u32(&sample->book);
             sample->book = (struct AdpcmBook*) PATCH(sample->book, memBase);
 
             /* s32 nEntries = (__builtin_bswap32(sample->book->order) * __builtin_bswap32(sample->book->npredictors) * 16);
@@ -440,17 +427,17 @@ void patch_sound(struct AudioBankSound* sound, u8* memBase, u8* offsetBase) {
             } */
             sample->loaded = 1;
         } else if (sample->loaded == 0x80) {
-            sample->sampleAddr = __builtin_bswap32(sample->sampleAddr);
+            sample->sampleAddr = (u8*)(uintptr_t) asset_be_u32(&sample->sampleAddr);
             PATCH(sample->sampleAddr, offsetBase);
 
-            sample->sampleSize = __builtin_bswap32(sample->sampleSize);
+            sample->sampleSize = asset_be_u32(&sample->sampleSize);
             sample->loaded = 0x81;
             sample->sampleAddr = (u8*) patched;
 
-            sample->loop = __builtin_bswap32(sample->loop);
+            sample->loop = (struct AdpcmLoop*)(uintptr_t) asset_be_u32(&sample->loop);
             sample->loop = (struct AdpcmLoop*) PATCH(sample->loop, memBase);
 
-            sample->book = __builtin_bswap32(sample->book);
+            sample->book = (struct AdpcmBook*)(uintptr_t) asset_be_u32(&sample->book);
             sample->book = (struct AdpcmBook*) PATCH(sample->book, memBase);
             /* s32 nEntries = (__builtin_bswap32(sample->book->order) * __builtin_bswap32(sample->book->npredictors) * 16);
             s16 *bookPtr = (s16 *)sample->book->book;
@@ -491,28 +478,22 @@ void patch_audio_bank(struct AudioBank* mem, u8* offset, u32 numInstruments, u32
     struct Drum** drums = NULL;
     u32 numDrums2 = 0;
 
-#define BASE_OFFSET_REAL(x, base) (void*) ((u32) (x) + (u32) __builtin_bswap32(base))
-#define PATCH(x, base) (patched = BASE_OFFSET_REAL(x, base))
-#define PATCH_MEM(x) x = PATCH(x, mem)
+/* Unpatched fields hold big-endian offsets relative to the bank base. */
+#define BANK_PTR(field_ptr) ((void*) ((u8*) mem + asset_be_u32(field_ptr)))
 
-#define BASE_OFFSET(x, base) BASE_OFFSET_REAL(base, x)
-
-    drums = __builtin_bswap32(mem->drums);
     numDrums2 = numDrums;
 
-    if (drums != NULL && numDrums2 > 0) {
-        mem->drums = PATCH(drums, __builtin_bswap32(mem));
+    if (asset_be_u32(&mem->drums) != 0 && numDrums2 > 0) {
+        mem->drums = (struct Drum**) BANK_PTR(&mem->drums);
 
         for (i = 0; i < numDrums2; i++) {
-            patched = __builtin_bswap32(mem->drums[i]);
-            if (patched != NULL) {
-                drum = PATCH(patched, __builtin_bswap32(mem));
+            if (asset_be_u32(&mem->drums[i]) != 0) {
+                drum = (struct Drum*) BANK_PTR(&mem->drums[i]);
                 mem->drums[i] = drum;
 
                 if (drum->loaded == 0) {
                     patch_sound(&drum->sound, (u8*) mem, offset);
-                    patched = __builtin_bswap32(drum->envelope);
-                    drum->envelope = BASE_OFFSET(__builtin_bswap32(mem), patched);
+                    drum->envelope = (struct AdsrEnvelope*) BANK_PTR(&drum->envelope);
                     drum->loaded = 1;
                 }
             }
@@ -529,25 +510,21 @@ void patch_audio_bank(struct AudioBank* mem, u8* offset, u32 numInstruments, u32
         end = numInstruments + tempInst;
 
         do {
-            if (*itInstrs != NULL) {
-                *itInstrs = BASE_OFFSET(*itInstrs, mem);
+            if (asset_be_u32(itInstrs) != 0) {
+                *itInstrs = (struct Instrument*) BANK_PTR(itInstrs);
                 instrument = *itInstrs;
                 if (instrument->loaded == 0) {
                     patch_sound(&instrument->lowNotesSound, (u8*) mem, offset);
                     patch_sound(&instrument->normalNotesSound, (u8*) mem, offset);
                     patch_sound(&instrument->highNotesSound, (u8*) mem, offset);
-                    patched = __builtin_bswap32(instrument->envelope);
-                    instrument->envelope = BASE_OFFSET(__builtin_bswap32(mem), patched);
+                    instrument->envelope = (struct AdsrEnvelope*) BANK_PTR(&instrument->envelope);
                     instrument->loaded = 1;
                 }
             }
             itInstrs++;
         } while (end != itInstrs);
     }
-#undef PATCH_MEM
-#undef PATCH
-#undef BASE_OFFSET_REAL
-#undef BASE_OFFSET
+#undef BANK_PTR
 }
 
 struct AudioBank* bank_load_immediate(s32 bankId, s32 arg1) {
@@ -608,7 +585,7 @@ u8 get_missing_bank(u32 seqId, s32* nonNullCount, s32* nullCount) {
     *nullCount = 0;
     *nonNullCount = 0;
 
-    offset = ((u16*) gAlBankSets)[seqId];
+    offset = asset_be_u16(gAlBankSets + seqId * 2);
 
     for (i = gAlBankSets[offset++], ret = 0; i != 0; i--) {
         bankId = gAlBankSets[offset++];
@@ -636,7 +613,7 @@ struct AudioBank* load_banks_immediate(s32 seqId, u8* outDefaultBank) {
     u16 offset = 0;
     u8 i = 0;
 
-    offset = ((u16*) gAlBankSets)[seqId];
+    offset = asset_be_u16(gAlBankSets + seqId * 2);
 
     for (i = gAlBankSets[offset++]; i != 0; i--) {
         bankId = gAlBankSets[offset++];
@@ -691,7 +668,9 @@ void preload_sequence(u32 seqId, u8 preloadMask) {
 }
 
 void load_sequence(u32 player, u32 seqId) {
-    //printf("%s(%u,%u)\n", __func__, player, seqId);
+#ifdef AUDIO_LOAD_TRACE
+    printf("load_sequence(%u,%u)\n", player, seqId);
+#endif
     gAudioLoadLock = AUDIO_LOCK_LOADING;
     load_sequence_internal(player, seqId);
     gAudioLoadLock = AUDIO_LOCK_NOT_LOADING;
@@ -712,6 +691,9 @@ void load_sequence_internal(u32 player, u32 seqId) {
     sequence_player_disable(seqPlayer);
 
     if (load_banks_immediate(seqId, &seqPlayer->defaultBank[0]) == NULL) {
+#ifdef AUDIO_LOAD_TRACE
+        printf("load_sequence: banks failed for seq %u\n", seqId);
+#endif
         return;
     }
 
@@ -721,9 +703,17 @@ void load_sequence_internal(u32 player, u32 seqId) {
         sequenceData = sequence_dma_immediate(seqId, 2);
 
         if (sequenceData == NULL) {
+#ifdef AUDIO_LOAD_TRACE
+            printf("load_sequence: seq data failed for seq %u\n", seqId);
+#endif
             return;
         }
     }
+#ifdef AUDIO_LOAD_TRACE
+    printf("load_sequence: seq %u enabled on player %u data %02x %02x %02x %02x\n",
+           seqId, player, ((u8*)sequenceData)[0], ((u8*)sequenceData)[1],
+           ((u8*)sequenceData)[2], ((u8*)sequenceData)[3]);
+#endif
 
     init_sequence_player(player);
     seqPlayer->scriptState.depth = 0;
@@ -814,44 +804,43 @@ void audio_init(void) {
     audio_shut_down_and_reset_step();
 
     // Load headers for sounds and sequences
+    /* All three tables are stored in ROM byte order (big-endian); the
+     * previous port's sequence table was pre-swapped by its toolchain
+     * and skipped patching, which no longer applies to the
+     * ROM-extracted sequences.bin. */
     gSeqFileHeader = (ALSeqFile*) buf;
     data = _sequencesSegmentRomStart;
     audio_dma_copy_immediate(data, gSeqFileHeader, 0x10);
-    gSequenceCount = gSeqFileHeader->seqCount;
-    size = gSequenceCount * sizeof(ALSeqData) + 4;
-    size = ALIGN16(size);
+    gSequenceCount = al_seq_file_seq_count(gSeqFileHeader);
+    size = ALIGN16(gSequenceCount * sizeof(ALSeqData) + AL_SEQ_FILE_RAW_HEADER_SIZE);
     gSeqFileHeader = soundAlloc(&gAudioInitPool, size);
-    audio_dma_copy_immediate(data, gSeqFileHeader, size);
-    func_800BB43C(gSeqFileHeader, data, 0);
+    audio_dma_copy_immediate(data, gSeqFileHeader, al_seq_file_raw_size(data));
+    al_seq_file_patch(gSeqFileHeader, data);
 
     // Load header for CTL (instrument metadata)
     gAlCtlHeader = (ALSeqFile*) buf;
     data = _audio_banksSegmentRomStart;
     audio_dma_copy_immediate(data, gAlCtlHeader, 0x10);
-    ctlSeqCount = __builtin_bswap16(gAlCtlHeader->seqCount);
-    size = ALIGN16(ctlSeqCount * sizeof(ALSeqData) + 4);
+    ctlSeqCount = al_seq_file_seq_count(gAlCtlHeader);
+    size = ALIGN16(ctlSeqCount * sizeof(ALSeqData) + AL_SEQ_FILE_RAW_HEADER_SIZE);
     gAlCtlHeader = soundAlloc(&gAudioInitPool, size);
-    audio_dma_copy_immediate(data, gAlCtlHeader, size);
-    gAlCtlHeader->revision = __builtin_bswap16(gAlCtlHeader->revision);
-    gAlCtlHeader->seqCount = __builtin_bswap16(gAlCtlHeader->seqCount);
-    func_800BB43C(gAlCtlHeader, data, 1);
+    audio_dma_copy_immediate(data, gAlCtlHeader, al_seq_file_raw_size(data));
+    al_seq_file_patch(gAlCtlHeader, data);
     gCtlEntries = soundAlloc(&gAudioInitPool, ctlSeqCount * sizeof(struct CtlEntry));
     for (i = 0; i < ctlSeqCount; i++) {
         audio_dma_copy_immediate(gAlCtlHeader->seqArray[i].offset, buf, 0x10);
-        gCtlEntries[i].numInstruments = __builtin_bswap32(buf[0]);
-        gCtlEntries[i].numDrums = __builtin_bswap32(buf[1]);
+        gCtlEntries[i].numInstruments = asset_be_u32(&buf[0]);
+        gCtlEntries[i].numDrums = asset_be_u32(&buf[1]);
     }
 
     // Load header for TBL (raw sound data)
     gAlTbl = (ALSeqFile*) buf;
     data = _audio_tablesSegmentRomStart;
     audio_dma_copy_immediate(data, gAlTbl, 0x10);
-    size = __builtin_bswap16(gAlTbl->seqCount) * sizeof(ALSeqData) + 4;
-    size = ALIGN16(size);
+    size = ALIGN16(al_seq_file_seq_count(gAlTbl) * sizeof(ALSeqData) + AL_SEQ_FILE_RAW_HEADER_SIZE);
     gAlTbl = soundAlloc(&gAudioInitPool, size);
-    audio_dma_copy_immediate(data, gAlTbl, size);
-    gAlTbl->seqCount = __builtin_bswap16(gAlTbl->seqCount);
-    func_800BB43C(gAlTbl, data, 1);
+    audio_dma_copy_immediate(data, gAlTbl, al_seq_file_raw_size(data));
+    al_seq_file_patch(gAlTbl, data);
 
     // Load bank sets for each sequence
     gAlBankSets = soundAlloc(&gAudioInitPool, 0x100);

@@ -1,0 +1,68 @@
+-- Stage 3 terminal/log smoke: boot the log image, verify the golden
+-- formatter values it publishes, then verify platform_fatal marks the
+-- status block and halts execution.
+--
+-- Run: make ie-smoke (or directly:
+--   ../IntuitionEngine/bin/ie_headless -nojit build/ie/log.ie68 \
+--       -script ie/smoke/log_smoke.ies)
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634  -- 'MK64'
+local FATAL = 0x44454144  -- 'DEAD'
+local WANT_LEN = 24
+local WANT_SUM = 1647
+local TIMEOUT_MS = 10000
+local SAMPLE_MS = 50
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+-- dbg.freeze() halts the CPU and only dbg.close() restarts it; wrap
+-- every sample in open/close (see STAGE3-NOTES.md).
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local fatal = read_be32(STATUS_ADDR + 12)
+    local len = read_be32(STATUS_ADDR + 16)
+    local sum = read_be32(STATUS_ADDR + 20)
+    dbg.resume()
+    dbg.close()
+    return magic, fatal, len, sum
+end
+
+local deadline = sys.time_ms() + TIMEOUT_MS
+local magic, fatal, len, sum = 0, 0, 0, 0
+
+while sys.time_ms() < deadline do
+    magic, fatal, len, sum = sample()
+    if magic == MAGIC and fatal == FATAL then
+        break
+    end
+    sys.wait_ms(SAMPLE_MS)
+end
+
+if magic ~= MAGIC then
+    sys.print(string.format("SMOKE FAIL: no boot magic (read 0x%08X)", magic))
+    sys.exit(1)
+end
+if len ~= WANT_LEN or sum ~= WANT_SUM then
+    sys.print(string.format("SMOKE FAIL: golden fmt len=%d sum=%d, want %d/%d",
+                            len, sum, WANT_LEN, WANT_SUM))
+    sys.exit(1)
+end
+if fatal ~= FATAL then
+    sys.print(string.format("SMOKE FAIL: no fatal marker (read 0x%08X)", fatal))
+    sys.exit(1)
+end
+
+-- Terminal output drains asynchronously; give it a moment so the
+-- platform_log/FATAL lines land in the engine output before exit.
+sys.wait_ms(500)
+
+sys.print("SMOKE PASS: platform_log golden ok, platform_fatal marked and halted")
+sys.exit(0)

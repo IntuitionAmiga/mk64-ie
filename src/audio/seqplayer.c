@@ -4,6 +4,7 @@
 #include "audio/data.h"
 #include "audio/internal.h"
 #include "audio/seqplayer.h"
+#include "asset_endian.h"
 #include "audio/load.h"
 #include "audio/heap.h"
 #include "audio/effects.h"
@@ -265,7 +266,9 @@ void sequence_player_disable(struct SequencePlayer* seqPlayer) {
     note_pool_clear(&seqPlayer->notePool);
     seqPlayer->finished = 1;
     seqPlayer->enabled = 0;
-    //printf("%s(%08x)\n", __func__, seqPlayer);
+#ifdef AUDIO_LOAD_TRACE
+    printf("seq disable: player seq %d state %d\n", seqPlayer->seqId, seqPlayer->state);
+#endif
 
     if (IS_SEQ_LOAD_COMPLETE(seqPlayer->seqId) && gSeqLoadStatus[seqPlayer->seqId] != 5) {
         gSeqLoadStatus[seqPlayer->seqId] = SOUND_LOAD_STATUS_DISCARDABLE;
@@ -652,7 +655,7 @@ void seq_channel_layer_process_script(struct SequenceChannelLayer* layer) {
                     uint32_t *stuning = (uint32_t *)&_tuning;
                     //printf("original l s tuning is %f\n", _tuning);
                     //printf("original l s tuning is %08x\n", *stuning);
-                    *stuning = __builtin_bswap32(*stuning);
+                    *stuning = asset_be_u32(stuning);
 
                     //printf("INIT_FREQ_SCALE: layer->sound->tuning %f\n", _tuning);
                     layer->freqScale = _tuning;
@@ -683,7 +686,7 @@ void seq_channel_layer_process_script(struct SequenceChannelLayer* layer) {
                             layer->sound = sound;
                             tuning = sound->tuning;
                             uint32_t *stuning = (uint32_t *)&tuning;
-                            *stuning = __builtin_bswap32(*stuning);
+                            *stuning = asset_be_u32(stuning);
                         } else {
                             layer->sound = NULL;
                             tuning = 1.0f;
@@ -731,7 +734,7 @@ void seq_channel_layer_process_script(struct SequenceChannelLayer* layer) {
 
                         float _tuning = sound->tuning;
                         uint32_t *stuning = (uint32_t *)&_tuning;
-                        *stuning = __builtin_bswap32(*stuning);
+                        *stuning = asset_be_u32(stuning);
                         layer->freqScale = gNoteFrequencies[cmd] * _tuning;
                         //printf("INIT_FREQ_SCALE: %f * %f == %f\n", gNoteFrequencies[cmd],_tuning, layer->freqScale);
                     } else {
@@ -768,6 +771,15 @@ void seq_channel_layer_process_script(struct SequenceChannelLayer* layer) {
 
     if (cmd != 0) {
         layer->note = alloc_note(layer);
+#ifdef AUDIO_LOAD_TRACE
+        {
+            static int nlog;
+            if (nlog < 12) {
+                nlog++;
+                printf("layer note alloc: %s\n", layer->note != NULL ? "ok" : "NULL");
+            }
+        }
+#endif
     }
 
     if (layer->note != NULL && layer->note->parentLayer == layer) {
@@ -955,7 +967,7 @@ void sequence_channel_process_script(struct SequenceChannel* seqChannel) {
 
                     case 0xEB:
                         cmd = m64_read_u8(state);
-                        sp38 = ((u16*) gAlBankSets)[seqPlayer->seqId];
+                        sp38 = asset_be_u16(gAlBankSets + seqPlayer->seqId * 2);
                         loBits = *(sp38 + gAlBankSets);
                         cmd = gAlBankSets[(((s32) sp38) + loBits) - cmd];
                         if (get_bank_or_seq(1, 2, cmd) != NULL) {
@@ -1054,7 +1066,7 @@ void sequence_channel_process_script(struct SequenceChannel* seqChannel) {
 
                     case 0xC6:
                         cmd = m64_read_u8(state);
-                        sp5A = ((u16*) gAlBankSets)[seqPlayer->seqId];
+                        sp5A = asset_be_u16(gAlBankSets + seqPlayer->seqId * 2);
                         loBits = *(sp5A + gAlBankSets);
                         cmd = gAlBankSets[(sp5A + loBits) - cmd];
                         if (get_bank_or_seq(1, 2, cmd) != NULL) {
@@ -1273,6 +1285,11 @@ void sequence_player_process_sequence(struct SequencePlayer* seqPlayer) {
     temp32 = 2; // I beg your pardon?
     if (IS_SEQ_LOAD_COMPLETE(seqPlayer->seqId) == 0 ||
         (IS_BANK_LOAD_COMPLETE(seqPlayer->defaultBank[0]) == 0)) {
+#ifdef AUDIO_LOAD_TRACE
+        printf("seq discard: seq %d status %d bank %d status %d\n",
+               seqPlayer->seqId, gSeqLoadStatus[seqPlayer->seqId],
+               seqPlayer->defaultBank[0], gBankLoadStatus[seqPlayer->defaultBank[0]]);
+#endif
         sequence_player_disable(seqPlayer);
         return;
     }
@@ -1306,6 +1323,9 @@ void sequence_player_process_sequence(struct SequencePlayer* seqPlayer) {
             cmd = m64_read_u8(state);
             if (cmd == 0xff) { // seq_end
                 if (state->depth == 0) {
+#ifdef AUDIO_LOAD_TRACE
+                    printf("seq end cmd at depth0\n");
+#endif
                     sequence_player_disable(seqPlayer);
                     break;
                 }
@@ -1561,6 +1581,34 @@ void sequence_player_process_sequence(struct SequencePlayer* seqPlayer) {
 
 void process_sequences(UNUSED s32 iterationsRemaining) {
     s32 i = 0;
+#ifdef AUDIO_LOAD_TRACE
+    {
+        static u32 dbg_tick;
+        if (++dbg_tick % 300 == 1) {
+            extern u8 sSoundRequestCount;
+            extern u8 sNumProcessedSoundRequests;
+            s32 active = 0, n;
+            for (n = 0; n < gMaxSimultaneousNotes; n++) {
+                if (gNotes[n].noteSubEu.enabled) {
+                    active++;
+                }
+            }
+            {
+                s32 ch = 0, k;
+                for (k = 0; k < CHANNELS_MAX; k++) {
+                    struct SequenceChannel* c = gSequencePlayers[2].channels[k];
+                    if (IS_SEQUENCE_CHANNEL_VALID(c) && c->enabled) {
+                        ch++;
+                    }
+                }
+                printf("audio tick %d: enabled %d%d%d%d req %d/%d notes %d p2ch %d\n", (int) dbg_tick,
+                       gSequencePlayers[0].enabled, gSequencePlayers[1].enabled,
+                       gSequencePlayers[2].enabled, gSequencePlayers[3].enabled,
+                       sNumProcessedSoundRequests, sSoundRequestCount, active, ch);
+            }
+        }
+    }
+#endif
     for (i = 0; i < SEQUENCE_PLAYERS; i++) {
         if (gSequencePlayers[i].enabled == 1) {
             sequence_player_process_sequence(&gSequencePlayers[i]);

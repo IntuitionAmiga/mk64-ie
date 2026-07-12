@@ -169,7 +169,7 @@ struct Drum* get_drum(s32 bankId, s32 drumId) {
         return NULL;
     }
 
-    if ((uintptr_t) gCtlEntries[bankId].drums < 0x8C010000U) {
+    if (gCtlEntries[bankId].drums == NULL) {
         stubbed_printf("Audio: voiceman: Percussion table pointer (bank %d) is irregular.\n");
         return NULL;
     }
@@ -197,6 +197,16 @@ void note_init(struct Note* note) {
 }
 
 void note_disable(struct Note* note) {
+#ifdef AUDIO_LOAD_TRACE
+    {
+        static int dlog;
+        if (dlog < 12 && note->parentLayer != NO_LAYER) {
+            dlog++;
+            printf("note_disable: prio %d adsr %d needsInit %d\n",
+                   note->priority, note->adsr.state, note->noteSubEu.needsInit);
+        }
+    }
+#endif
     if (note->noteSubEu.needsInit == 1) {
         note->noteSubEu.needsInit = 0;
     } else {

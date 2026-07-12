@@ -1,0 +1,54 @@
+local PACK_DATA_BASE = 0x01000000
+local HASH_BYTES = 0x10000
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634
+local GAMESTATE_ADDR = 0x10619d20
+local WARMUP_MS = 180000
+local POLL_MS = 250
+
+local function rd_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function hash_region(addr, size)
+    local h = 5381
+    dbg.open(); dbg.freeze()
+    for i = 0, size - 1 do
+        h = (h * 33 + mem.read8(addr + i)) % 4294967296
+    end
+    dbg.resume(); dbg.close()
+    return h
+end
+
+local before = hash_region(PACK_DATA_BASE, HASH_BYTES)
+sys.print(string.format("PACK: before hash=0x%08X", before))
+
+local deadline = sys.time_ms() + WARMUP_MS
+local swaps, state = 0, -1
+while sys.time_ms() < deadline do
+    dbg.open(); dbg.freeze()
+    local magic = rd_be32(STATUS_ADDR)
+    swaps = rd_be32(STATUS_ADDR + 16)
+    state = rd_be32(GAMESTATE_ADDR)
+    dbg.resume(); dbg.close()
+    if magic == MAGIC and state == 4 then
+        break
+    end
+    sys.wait_ms(POLL_MS)
+end
+
+if state ~= 4 then
+    sys.print(string.format("PACK FAIL: did not reach race (swaps=%d state=%d)", swaps, state))
+    sys.exit(1)
+end
+
+sys.wait_ms(1500)
+local after = hash_region(PACK_DATA_BASE, HASH_BYTES)
+sys.print(string.format("PACK: after hash=0x%08X swaps=%d", after, swaps))
+if before ~= after then
+    sys.print("PACK FAIL: packed data window changed during rendering")
+    sys.exit(1)
+end
+sys.print("PACK: data window stable")
+sys.exit(0)

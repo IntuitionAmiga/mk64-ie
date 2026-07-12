@@ -3,10 +3,6 @@
 
 #include "audio/internal.h"
 
-#ifdef TARGET_N64
-#define IS_BIG_ENDIAN 1
-#endif
-
 #define ADSR_STATE_DISABLED 0
 #define ADSR_STATE_INITIAL 1
 #define ADSR_STATE_START_LOOP 2

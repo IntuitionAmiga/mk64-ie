@@ -1,0 +1,42 @@
+-- x86 T&L coprocessor smoke (plan P0-P1).
+--
+-- Run: make ie-coproc-smoke
+--
+-- Wants all six checks: init, xform round-trip, unlit batch (bit-exact),
+-- high-RAM (0x10000000+) source and destination, lit path, async path.
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local WANT_CHECKS = 0x3F
+local TIMEOUT_MS = 20000
+local SAMPLE_MS = 100
+
+local function read_u32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local deadline = sys.time_ms() + TIMEOUT_MS
+while sys.time_ms() < deadline do
+    dbg.open()
+    dbg.freeze()
+    local magic = read_u32(STATUS_ADDR)
+    local checks = read_u32(STATUS_ADDR + 16)
+    local fail = read_u32(STATUS_ADDR + 20)
+    local dbgv = read_u32(STATUS_ADDR + 24)
+    dbg.resume()
+    dbg.close()
+    if magic == MAGIC then
+        if checks == WANT_CHECKS then
+            sys.print("COPROC SMOKE PASS: init, xform, batch, high-RAM, lit, async")
+            sys.exit(0)
+        end
+        sys.print(string.format(
+            "COPROC SMOKE FAIL: checks=0x%02x (want 0x3f) first-fail=%d dbg=0x%08x",
+            checks, fail, dbgv))
+        sys.exit(1)
+    end
+    sys.wait_ms(SAMPLE_MS)
+end
+sys.print("COPROC SMOKE FAIL: status block never appeared")
+sys.exit(1)

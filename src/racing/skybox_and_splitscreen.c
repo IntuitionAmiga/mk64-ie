@@ -1,5 +1,6 @@
 #include <ultra64.h>
 #include <macros.h>
+#include "platform/platform.h"
 #include <PR/gbi.h>
 #include <mk64.h>
 #include <course.h>
@@ -1534,7 +1535,6 @@ void copy_framebuffer(s32 arg0, s32 arg1, s32 width, s32 height, u16* source, u1
         }
     }
 }
-#include <kos.h>
 static inline uint16_t rgb565_to_rgba5551(uint16_t rgb565) {
     // Extract components from RGB565
     uint8_t r5 = (rgb565 >> 11) & 0x1F;         // 5 bits red
@@ -1554,19 +1554,34 @@ static inline uint16_t rgb565_to_rgba5551(uint16_t rgb565) {
 }
 
 void copy_framebuffer2(s32 xofs, s32 yofs, s32 width, s32 height, UNUSED u16* source, u16* target) {
-    s32 y;
-    s32 x;
-    s32 targetIndex;
-//    s32 sourceIndex;
-    target = segmented_to_virtual(target);
-    targetIndex = 0;
-    for (y = 0; y < height; y++) {
-        s32 y_h = (y + yofs) * 2;
+    /*
+     * Wario Stadium's jumbotron samples the previous frame back out of
+     * the framebuffer. The previous console port read its video RAM
+     * directly; the IE Voodoo HLE has no guest-visible framebuffer
+     * readback yet (LFB reads are compat-pending), so the screen shows
+     * black until the engine grows one. Explicit degradation, not a
+     * silent one: logged once.
+     *
+     * IE_GFX_SVC note: this fill runs while a service frame may still
+     * be in flight, but the output is a constant (black) every call, so
+     * a concurrent worker read can never see torn data. If real
+     * framebuffer readback ever lands here, the fill starts changing
+     * per frame and this producer needs ie_gfx_svc_drain_for_write()
+     * (or a double-buffered target) first.
+     */
+    static int warned;
+    s32 count = width * height;
+    s32 i;
 
-        for (x = 0; x < width; x++, targetIndex++) {
-            s32 x_w = x + xofs;
-            target[targetIndex] = rgb565_to_rgba5551(vram_s[(y_h * 640) + (x_w * 2)]);
-        }
+    (void) xofs;
+    (void) yofs;
+    if (!warned) {
+        warned = 1;
+        platform_log("copy_framebuffer2: no framebuffer readback on IE; jumbotron blank");
+    }
+    target = segmented_to_virtual(target);
+    for (i = 0; i < count; i++) {
+        target[i] = 1; /* opaque black rgba5551 */
     }
 }
 

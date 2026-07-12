@@ -20,6 +20,11 @@ uint8_t __attribute__((aligned(32))) OTHER_BUF[OTHER_BUF_SIZE];
 
 uint8_t __attribute__((aligned(32))) COURSE_BUF[COURSE_BUF_SIZE];
 uint8_t __attribute__((aligned(32))) UNPACK_BUF[UNPACK_BUF_SIZE];
+// unpacked course displaylists (segment 7); the size constant counts
+// original 8-byte Gfx units, the buffer holds native Gfx entries
+Gfx __attribute__((aligned(32))) UNPACKED_DL_BUF[UNPACKED_DL_BUF_SIZE / 8];
+// <course>_offsets.bin (segment 9: light/texture/displaylist tables)
+uint8_t __attribute__((aligned(32))) COURSE_OFFSETS_BUF[COURSE_OFFSETS_BUF_SIZE];
 uint8_t __attribute__((aligned(32))) CEREMONY_BUF[CEREMONY_BUF_SIZE];////36232];
 uint8_t __attribute__((aligned(32))) COMP_VERT_BUF[COMP_VERT_BUF_SIZE];
 uint8_t __attribute__((aligned(32))) DECOMP_VERT_BUF[DECOMP_VERT_BUF_SIZE];

@@ -1,8 +1,5 @@
 #include "libultra_internal.h"
-//#ifdef GBI_FLOATS
 #include <string.h>
-//#endif
-#include "sh4zam.h"
 
 #ifndef GBI_FLOATS
 void guMtxF2L(float mf[4][4], Mtx* m) {
@@ -44,16 +41,11 @@ void guMtxL2F(float mf[4][4], Mtx* m) {
 #else
 
 void guMtxF2L(float mf[4][4], Mtx* m) {
-    //n64_memcpy(m, mf, sizeof(Mtx));
-    //shz_xmtrx_load_4x4_unaligned(mf);
-    //shz_xmtrx_store_4x4_unaligned(m);
-    //*m = *(Mtx*)mf;
-    shz_memcpy4_16(m, mf);
+    memcpy(m->m, mf, sizeof(m->m));
 }
 #endif
 
 void guMtxIdentF(float mf[4][4]) {
-#if 0
     int r, c;
     for (r = 0; r < 4; r++) {
         for (c = 0; c < 4; c++) {
@@ -64,9 +56,6 @@ void guMtxIdentF(float mf[4][4]) {
             }
         }
     }
-#endif
-        shz_xmtrx_init_identity();
-        shz_xmtrx_store_4x4_unaligned(mf);
 }
 
 void guMtxIdent(Mtx* m) {

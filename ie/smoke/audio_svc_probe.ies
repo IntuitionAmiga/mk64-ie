@@ -1,0 +1,47 @@
+-- Audio service bring-up probe: boot the game with IE_AUDIO_SVC seams and
+-- watch the worker's feedback block (0x9EFC0): magic 'ASVC' after INIT,
+-- pump counter advancing while the attract demo runs. Guest RAM u32s are
+-- composed byte-wise (big-endian guest view).
+local FB = 0x9EFC0
+local MAGIC = 0x41535643
+
+local function frozen(fn)
+    cpu.freeze()
+    local ok, v = pcall(fn)
+    cpu.resume()
+    if not ok then
+        sys.print("SCRIPT ERROR: " .. tostring(v))
+        sys.exit(1)
+    end
+    return v
+end
+
+local function rd32(addr)
+    return frozen(function()
+        local b0 = mem.read8(addr)
+        local b1 = mem.read8(addr + 1)
+        local b2 = mem.read8(addr + 2)
+        local b3 = mem.read8(addr + 3)
+        return b0 * 0x1000000 + b1 * 0x10000 + b2 * 0x100 + b3
+    end)
+end
+
+sys.print("AUDIO_SVC_PROBE start")
+local deadline = sys.time_ms() + 60000
+while rd32(FB) ~= MAGIC and sys.time_ms() < deadline do sys.wait_ms(500) end
+if rd32(FB) ~= MAGIC then
+    sys.print("AUDIO_SVC_PROBE FAIL: no ASVC magic (worker init)")
+    sys.exit(1)
+end
+sys.print("AUDIO_SVC_PROBE ready: worker init complete")
+
+local p0 = rd32(FB + 0x10)
+sys.wait_ms(5000)
+local p1 = rd32(FB + 0x10)
+sys.print(string.format("AUDIO_SVC_PROBE pumps %d -> %d usec_last=%d", p0, p1, rd32(FB + 0x14)))
+if p1 > p0 then
+    sys.print("AUDIO_SVC_PROBE PASS")
+    sys.exit(0)
+end
+sys.print("AUDIO_SVC_PROBE FAIL: pump counter stalled")
+sys.exit(1)

@@ -1,0 +1,16 @@
+local function frozen(fn)
+    cpu.freeze()
+    local ok, v = pcall(fn)
+    cpu.resume()
+    if not ok then return -1 end
+    return v
+end
+local function rd8(a) return frozen(function() return mem.read8(a) end) end
+sys.wait_ms(15000)
+local state = frozen(function() return mem.read32(0xF2374) end)
+sys.print(string.format("worker_state=0x%x r6h=%d r6t=%d", state, rd8(0x791200), rd8(0x791201)))
+-- dump ring6 descriptor slot bytes 0..31 raw
+local d = {}
+for i = 0, 31 do d[#d+1] = string.format("%02x", rd8(0x791208 + i)) end
+sys.print("slot0: " .. table.concat(d, " "))
+sys.exit(0)

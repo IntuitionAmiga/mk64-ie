@@ -11,7 +11,7 @@
  **************************************************************************/
 
 #include "libultra_internal.h"
-#include "sh4zam.h"
+#include <math.h>
 
 void guLookAtF(float mf[4][4], float xEye, float yEye, float zEye, float xAt, float yAt, float zAt, float xUp,
                float yUp, float zUp) {
@@ -24,7 +24,7 @@ void guLookAtF(float mf[4][4], float xEye, float yEye, float zEye, float xAt, fl
     zLook = zAt - zEye;
 
     /* Negate because positive Z is behind us: */
-    len = -1.0 / sqrtf(shz_mag_sqr4f(xLook, yLook, zLook, 0.0f));
+    len = -1.0 / sqrtf(xLook * xLook + yLook * yLook + zLook * zLook);
     xLook *= len;
     yLook *= len;
     zLook *= len;
@@ -34,7 +34,7 @@ void guLookAtF(float mf[4][4], float xEye, float yEye, float zEye, float xAt, fl
     xRight = yUp * zLook - zUp * yLook;
     yRight = zUp * xLook - xUp * zLook;
     zRight = xUp * yLook - yUp * xLook;
-    len = 1.0 / sqrtf(shz_mag_sqr4f(xRight, yRight, zRight, 0.0f));
+    len = 1.0 / sqrtf(xRight * xRight + yRight * yRight + zRight * zRight);
     xRight *= len;
     yRight *= len;
     zRight *= len;
@@ -44,7 +44,7 @@ void guLookAtF(float mf[4][4], float xEye, float yEye, float zEye, float xAt, fl
     xUp = yLook * zRight - zLook * yRight;
     yUp = zLook * xRight - xLook * zRight;
     zUp = xLook * yRight - yLook * xRight;
-    len = 1.0 / sqrtf(shz_mag_sqr4f(xUp, yUp, zUp, 0.0f));
+    len = 1.0 / sqrtf(xUp * xUp + yUp * yUp + zUp * zUp);
     xUp *= len;
     yUp *= len;
     zUp *= len;
@@ -65,19 +65,10 @@ void guLookAtF(float mf[4][4], float xEye, float yEye, float zEye, float xAt, fl
     mf[1][3] = 0;
     mf[2][3] = 0;
     mf[3][3] = 1;
-#if 0 // I DO NOT UNDERSTAND WHY THIS DOESN'T WORK!!!
-    shz_vec3_t out = shz_matrix4x4_trans_vec3((SHZ_ALIASING const shz_matrix_4x4_t *)mf, (shz_vec3_t) { .x = xEye, .y = yEye, .z = zEye });
-    mf[3][0] = -out.x;
-    mf[3][1] = -out.y;
-    mf[3][2] = -out.z;
-#else
-    mf[3][0] = -shz_dot8f(xEye,   yEye,   zEye,   0.0f,
-                          xRight, yRight, zRight, 0.0f);
-    mf[3][1] = -shz_dot8f(xEye, yEye, zEye, 0.0f,
-                          xUp,  yUp,  zUp,  0.0f);
-    mf[3][2] = -shz_dot8f(xEye,  yEye,  zEye,  0.0f,
-                          xLook, yLook, zLook, 0.0f);
-#endif
+
+    mf[3][0] = -(xEye * xRight + yEye * yRight + zEye * zRight);
+    mf[3][1] = -(xEye * xUp + yEye * yUp + zEye * zUp);
+    mf[3][2] = -(xEye * xLook + yEye * yLook + zEye * zLook);
 }
 
 #ifndef GBI_FLOATS

@@ -1,7 +1,13 @@
 #include <ultra64.h>
 #include <macros.h>
-#if 0
-const f32 gSineTable[] = {
+
+/* N64-faithful sine table for the u16 binary-angle trig in
+ * math_util.h. 0x1400 entries: sins() indexes the first 0x1000
+ * (full circle at >>4 resolution) and gCosineTable overlaps at
+ * +0x400 (a quarter turn), reading through entry 0x13FF. The
+ * overlap is pointer arithmetic within this one array, so it is
+ * well-defined; see trig_tables.h. */
+const f32 gSineTable[0x1400] = {
     0.000000000f, 0.0015339801f, 0.0030679568f, 0.004601926f, 0.0061358847f, 0.007669829f, 0.009203754f, 0.010737659f,
     0.012271538f, 0.0138053885f, 0.015339206f,  0.016872987f, 0.018406730f,  0.019940428f, 0.021474080f, 0.023007682f,
     0.024541229f, 0.026074719f,  0.027608145f,  0.029141508f, 0.030674804f,  0.032208025f, 0.033741172f, 0.035274237f,
@@ -4234,7 +4240,7 @@ const f32 gSineTable[] = {
     0.999995291f,
     0.999998808f,
 };
-#endif
+
 const s16 gArctanTable[0x401] = {
     0x0000, 0x000A, 0x0014, 0x001F, 0x0029, 0x0033, 0x003D, 0x0047, 0x0051, 0x005C, 0x0066, 0x0070, 0x007A, 0x0084,
     0x008F, 0x0099, 0x00A3, 0x00AD, 0x00B7, 0x00C2, 0x00CC, 0x00D6, 0x00E0, 0x00EA, 0x00F4, 0x00FF, 0x0109, 0x0113,

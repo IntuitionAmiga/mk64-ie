@@ -1,0 +1,117 @@
+-- Stage 4 audio voice smoke: the full game runs with the host-side
+-- SFX voice offload. Verifies that the time-window audio pump runs,
+-- that live voices are reported, and that the extended 32-channel SFX
+-- MMIO window has playing voices with no guest-reported SFX errors during
+-- title audio.
+--
+-- Run: make ie-audio-smoke
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local SFX_EXT_BASE = 0x000F2600
+local SFX_STRIDE = 0x20
+local SFX_CTRL = 0x1C
+local BOOT_TIMEOUT_MS = 90000
+local AUDIO_TIMEOUT_MS = 120000
+local MEASURE_MS = 3000
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+local function sfx_status_counts()
+    local playing = 0
+    for ch = 0, 31 do
+        local status = mem.read32(SFX_EXT_BASE + ch * SFX_STRIDE + SFX_CTRL)
+        if status % 2 == 1 then
+            playing = playing + 1
+        end
+    end
+    return playing
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local swaps = read_be32(STATUS_ADDR + 16)
+    local polls = read_be32(STATUS_ADDR + 24)
+    local pumps = read_be32(STATUS_ADDR + 28)
+    local live = read_be32(STATUS_ADDR + 32)
+    local error_stops = read_be32(STATUS_ADDR + 128)
+    local playing = sfx_status_counts()
+    dbg.resume()
+    dbg.close()
+    return magic, swaps, polls, pumps, live, playing, error_stops
+end
+
+local deadline = sys.time_ms() + BOOT_TIMEOUT_MS
+local magic, swaps, polls, pumps, live, playing, error_stops = 0, 0, 0, 0, 0, 0, 0
+while sys.time_ms() < deadline do
+    magic, swaps, polls, pumps, live, playing, error_stops = sample()
+    if magic == MAGIC and swaps >= 3 then
+        break
+    end
+    sys.wait_ms(1000)
+end
+
+if magic ~= MAGIC or swaps < 3 then
+    sys.print(string.format("SMOKE FAIL: game did not boot (magic 0x%08X swaps %d)", magic, swaps))
+    sys.exit(1)
+end
+
+deadline = sys.time_ms() + AUDIO_TIMEOUT_MS
+while sys.time_ms() < deadline do
+    magic, swaps, polls, pumps, live, playing, error_stops = sample()
+    if magic == MAGIC and pumps > 0 and live > 0 and playing > 0 then
+        break
+    end
+    sys.wait_ms(1000)
+end
+
+if magic ~= MAGIC then
+    sys.print("SMOKE FAIL: status block lost during audio wait")
+    sys.exit(1)
+end
+if error_stops > 0 then
+    sys.print(string.format("SMOKE FAIL: %d SFX trigger/read errors reported by guest", error_stops))
+    sys.exit(1)
+end
+if pumps == 0 then
+    sys.print("SMOKE FAIL: audio voice pump never ran")
+    sys.exit(1)
+end
+if live == 0 or playing == 0 then
+    sys.print(string.format("SMOKE FAIL: no live voices (live %d playing %d)", live, playing))
+    sys.exit(1)
+end
+
+local pumps0 = pumps
+local swaps0 = swaps
+sys.wait_ms(MEASURE_MS)
+local _, swaps2, polls2, pumps2, live2, playing2, error_stops2 = sample()
+
+if error_stops2 > error_stops then
+    sys.print(string.format("SMOKE FAIL: SFX trigger/read errors increased (%d -> %d)", error_stops, error_stops2))
+    sys.exit(1)
+end
+if pumps2 <= pumps0 then
+    sys.print(string.format("SMOKE FAIL: audio pump stalled at %d", pumps0))
+    sys.exit(1)
+end
+if swaps2 <= swaps0 then
+    sys.print(string.format("SMOKE FAIL: frame counter stalled at %d", swaps0))
+    sys.exit(1)
+end
+if live2 == 0 or playing2 == 0 then
+    sys.print(string.format("SMOKE FAIL: voices stopped unexpectedly (live %d playing %d)", live2, playing2))
+    sys.exit(1)
+end
+
+sys.print(string.format(
+    "SMOKE PASS: audio voices live (pumps %d -> %d, polls %d, live %d, playing %d)",
+    pumps0, pumps2, polls2, live2, playing2))
+sys.exit(0)

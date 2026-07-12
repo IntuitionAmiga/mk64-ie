@@ -1,0 +1,69 @@
+-- Stage 3 file/asset backend smoke: requires the generated Stage 1.5
+-- layout; the engine must be launched with -file-root rom_assets.
+--
+-- Run: make ie-asset-smoke
+--
+-- The golden values are properties of the accepted source ROM (see
+-- ie/asset_main.c): result bitmask 0x1FF, instrument_sets.bin byte sum
+-- 35666, Mario Raceway vertex_count 5757 and packed_offset 0x96F4.
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local WANT_RESULTS = 0x1FF
+local WANT_SUM = 35666
+local WANT_VC = 5757
+local WANT_PO = 0x96F4
+local TIMEOUT_MS = 15000
+local SAMPLE_MS = 50
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+-- dbg.freeze() halts the CPU and only dbg.close() restarts it; wrap
+-- every sample in open/close (see STAGE3-NOTES.md).
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local results = read_be32(STATUS_ADDR + 16)
+    local sum = read_be32(STATUS_ADDR + 20)
+    local vc = read_be32(STATUS_ADDR + 24)
+    local po = read_be32(STATUS_ADDR + 28)
+    dbg.resume()
+    dbg.close()
+    return magic, results, sum, vc, po
+end
+
+local deadline = sys.time_ms() + TIMEOUT_MS
+local magic, results, sum, vc, po = 0, 0, 0, 0, 0
+
+while sys.time_ms() < deadline do
+    magic, results, sum, vc, po = sample()
+    if magic == MAGIC then
+        break
+    end
+    sys.wait_ms(SAMPLE_MS)
+end
+
+-- Let the guest's terminal lines drain before printing the verdict.
+sys.wait_ms(500)
+
+if magic ~= MAGIC then
+    sys.print(string.format("SMOKE FAIL: no boot magic (read 0x%08X)", magic))
+    sys.exit(1)
+end
+if results ~= WANT_RESULTS then
+    sys.print(string.format("SMOKE FAIL: asset checks 0x%03X, want 0x%03X", results, WANT_RESULTS))
+    sys.exit(1)
+end
+if sum ~= WANT_SUM or vc ~= WANT_VC or po ~= WANT_PO then
+    sys.print(string.format("SMOKE FAIL: goldens sum=%d vc=%d po=0x%X", sum, vc, po))
+    sys.exit(1)
+end
+
+sys.print("SMOKE PASS: asset backend serves the generated layout byte-identical")
+sys.exit(0)

@@ -1,0 +1,100 @@
+-- Stage 3 input backend smoke: inject scancodes and assert clean
+-- pressed/released transitions through platform_poll_controller.
+--
+-- Run: make ie-input-smoke
+--
+-- Mapping under test (ie/ie_platform_input.c): X -> A (0x8000),
+-- Enter -> Start (0x1000), Left arrow -> stick_x -80.
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local TIMEOUT_MS = 15000
+local SAMPLE_MS = 30
+
+local BTN_A = 0x8000
+local BTN_START = 0x1000
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+-- dbg.freeze() halts the CPU and only dbg.close() restarts it; wrap
+-- every sample in open/close (see STAGE3-NOTES.md).
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local buttons = read_be32(STATUS_ADDR + 16)
+    local stick = read_be32(STATUS_ADDR + 20)
+    local presses = read_be32(STATUS_ADDR + 24)
+    local ports_ok = read_be32(STATUS_ADDR + 28)
+    dbg.resume()
+    dbg.close()
+    return magic, buttons, stick, presses, ports_ok
+end
+
+local function wait_for(pred, what)
+    local deadline = sys.time_ms() + TIMEOUT_MS
+    while sys.time_ms() < deadline do
+        local magic, buttons, stick, presses, ports_ok = sample()
+        if magic == MAGIC and pred(buttons, stick, presses, ports_ok) then
+            return buttons, stick, presses, ports_ok
+        end
+        sys.wait_ms(SAMPLE_MS)
+    end
+    sys.print("SMOKE FAIL: timeout waiting for " .. what)
+    sys.exit(1)
+end
+
+local function stick_x(stick)
+    return math.floor(stick / 256) % 256 - 128
+end
+
+-- Boot with all inputs idle.
+wait_for(function(b) return true end, "boot magic")
+local b0 = select(1, wait_for(function(b) return b == 0 end, "idle buttons"))
+
+-- Press X: A button appears...
+term.scancode(0x2D)
+wait_for(function(b) return b == BTN_A end, "A pressed")
+-- ...and holding it keeps it held across polls.
+sys.wait_ms(100)
+wait_for(function(b) return b == BTN_A end, "A held")
+
+-- Release X: back to idle.
+term.scancode(0x2D + 0x80)
+wait_for(function(b) return b == 0 end, "A released")
+
+-- Chord: Start + A together, then release one at a time.
+term.scancode(0x1C)
+term.scancode(0x2D)
+wait_for(function(b) return b == (BTN_A + BTN_START) end, "A+Start chord")
+term.scancode(0x2D + 0x80)
+wait_for(function(b) return b == BTN_START end, "Start alone")
+term.scancode(0x1C + 0x80)
+wait_for(function(b) return b == 0 end, "chord released")
+
+-- Analog stick from the left arrow.
+term.scancode(0x4B)
+wait_for(function(b, s) return stick_x(s) == -80 end, "stick left -80")
+term.scancode(0x4B + 0x80)
+wait_for(function(b, s) return stick_x(s) == 0 end, "stick centred")
+
+-- Ports 1-3 must report disconnected, and every make code above must
+-- have been counted (4 presses: X, Enter, X again, Left).
+local _, final_buttons, final_stick, final_presses, final_ports = sample()
+if final_ports ~= 1 then
+    sys.print("SMOKE FAIL: ports 1-3 not reported disconnected")
+    sys.exit(1)
+end
+if final_presses < 4 then
+    sys.print(string.format("SMOKE FAIL: press events %d < 4", final_presses))
+    sys.exit(1)
+end
+
+sys.wait_ms(300)
+sys.print("SMOKE PASS: input transitions clean (press/hold/release, chord, stick)")
+sys.exit(0)

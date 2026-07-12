@@ -1,0 +1,26 @@
+local function frozen(fn)
+    cpu.freeze()
+    local ok, v = pcall(fn)
+    cpu.resume()
+    if not ok then return -1 end
+    return v
+end
+local function rd8(a) return frozen(function() return mem.read8(a) end) end
+local function rd32(addr)
+    return frozen(function()
+        return mem.read8(addr)*0x1000000 + mem.read8(addr+1)*0x10000 + mem.read8(addr+2)*0x100 + mem.read8(addr+3)
+    end)
+end
+local t0 = sys.time_ms()
+local last = ""
+while sys.time_ms() - t0 < 30000 do
+    local s = string.format("r6=%d/%d r2=%d/%d pumps=%d magic=%08x",
+        rd8(0x791200), rd8(0x791201), rd8(0x790600), rd8(0x790601),
+        rd32(0x9EFD0), rd32(0x9EFC0))
+    if s ~= last then
+        sys.print(string.format("[%d ms] %s", sys.time_ms() - t0, s))
+        last = s
+    end
+    sys.wait_ms(100)
+end
+sys.exit(0)

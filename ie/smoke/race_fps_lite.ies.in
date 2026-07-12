@@ -1,0 +1,87 @@
+-- Poll-free race FPS measurement. The windowed engine pays a heavy
+-- pipeline stall per debugger freeze, so the polling fps scripts
+-- depress what they measure (4Hz polling halves windowed fps versus
+-- 1Hz). This variant brackets one long untouched span with exactly two
+-- samples: warm up with slow 1Hz polls until the demo race is past
+-- swap 600, then run SPAN_MS with no debugger traffic at all and
+-- sample once at the end.
+--
+-- Run: make ie-race-fps-lite
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+-- @GAMESTATE_ADDR@ is substituted from the fresh game.map when the
+-- Makefile instantiates this template into $(IE_BUILD_DIR).
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@ -- s32 gGamestate; RACING == 4
+local WARMUP_MIN_SWAPS = 620
+local SPAN_MS = 20000
+local RACE_LAST_SWAP = 1500 -- demo race ends ~1547; past this the span is suspect
+local WARMUP_TIMEOUT_MS = 480000
+local WARMUP_POLL_MS = 1000
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local swaps = read_be32(STATUS_ADDR + 16)
+    local state = read_be32(GAMESTATE_ADDR)
+    dbg.resume()
+    dbg.close()
+    return magic, swaps, state
+end
+
+local deadline = sys.time_ms() + WARMUP_TIMEOUT_MS
+local swaps0 = nil
+local t0 = nil
+while sys.time_ms() < deadline do
+    local magic, swaps, state = sample()
+    if magic == MAGIC and state == 4 and swaps >= WARMUP_MIN_SWAPS then
+        swaps0 = swaps
+        t0 = sys.time_ms()
+        break
+    end
+    sys.wait_ms(WARMUP_POLL_MS)
+end
+
+if swaps0 == nil then
+    sys.print("RACE FPS LITE FAIL: race window never reached before timeout")
+    sys.exit(1)
+end
+
+if sys.perf_reset ~= nil then
+    sys.perf_reset()
+end
+
+sys.wait_ms(SPAN_MS)
+
+local perf = nil
+if sys.perf_report ~= nil then
+    perf = sys.perf_report()
+end
+
+local magic, swaps1, state = sample()
+local elapsed_s = (sys.time_ms() - t0) / 1000.0
+if magic ~= MAGIC then
+    sys.print("RACE FPS LITE FAIL: status block lost")
+    sys.exit(1)
+end
+if state ~= 4 or swaps1 > RACE_LAST_SWAP then
+    sys.print(string.format(
+        "RACE FPS LITE FAIL: span left the race (state=%d swaps=%d) - shorten SPAN_MS",
+        state, swaps1))
+    sys.exit(1)
+end
+
+local fps = (swaps1 - swaps0) / elapsed_s
+sys.print(string.format("RACE FPS LITE: %.2f (swaps %d -> %d in %.1f s, 2 samples)",
+    fps, swaps0, swaps1, elapsed_s))
+if perf ~= nil and perf ~= "" then
+    sys.print("PERF SPAN REPORT (IE_PERF_ACCT=1):")
+    sys.print(perf)
+end
+sys.exit(0)

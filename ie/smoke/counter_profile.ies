@@ -1,0 +1,162 @@
+-- Full-game performance-counter profile for decision gates.
+--
+-- Samples an early title/menu window once the full game is rendering.
+-- The profile is for cost ranking, not absolute timing; ie-fps still
+-- owns end-to-end speed comparisons over its later swap span.
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634 -- 'MK64'
+local PERF_ADDR = 0x0009F100
+local PERF_MAGIC = 0x50455246 -- 'PERF'
+
+local START_SWAP = 4
+local END_SWAP = 63
+local BOOT_TIMEOUT_MS = 90000
+local SAMPLE_TIMEOUT_MS = 90000
+local SAMPLE_INTERVAL_MS = 100
+local PROGRESS_INTERVAL_MS = 15000
+
+local function report(line)
+    sys.print(line)
+end
+
+local counters = {
+    { "texrects", 0 },
+    { "tris", 1 },
+    { "tex_imports", 2 },
+    { "tex_stream_bytes", 3 },
+    { "draw_calls", 4 },
+    { "mmio_writes", 5 },
+    { "cmd_submits", 6 },
+    { "cmd_pairs", 7 },
+    { "clipped_tris", 8 },
+    { "audio_voice_writes", 9 },
+    { "vtx_mtx_reuse", 10 },
+    { "memcpy_0_63", 11 },
+    { "memcpy_64_255", 12 },
+    { "memcpy_256_1023", 13 },
+    { "memcpy_1024_plus", 14 },
+}
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    local out = {}
+
+    dbg.open()
+    dbg.freeze()
+    out.status_magic = read_be32(STATUS_ADDR)
+    out.swaps = read_be32(STATUS_ADDR + 16)
+    out.perf_magic = read_be32(PERF_ADDR)
+    out.frame = read_be32(PERF_ADDR + 4)
+    for _, c in ipairs(counters) do
+        out[c[1]] = read_be32(PERF_ADDR + 8 + c[2] * 4)
+    end
+    dbg.resume()
+    dbg.close()
+    return out
+end
+
+local deadline = sys.time_ms() + BOOT_TIMEOUT_MS
+local s = sample()
+local progress_at = 0
+while sys.time_ms() < deadline do
+    s = sample()
+    if s.status_magic == STATUS_MAGIC and s.swaps >= START_SWAP
+       and s.perf_magic == PERF_MAGIC and s.frame > 0 then
+        break
+    end
+    if sys.time_ms() >= progress_at then
+        report(string.format(
+            "PROFILE warmup: target swap %d, status 0x%08X swaps %d perf 0x%08X frame %d",
+            START_SWAP, s.status_magic, s.swaps, s.perf_magic, s.frame))
+        progress_at = sys.time_ms() + PROGRESS_INTERVAL_MS
+    end
+    sys.wait_ms(1000)
+end
+
+if s.status_magic ~= STATUS_MAGIC or s.swaps < START_SWAP or s.perf_magic ~= PERF_MAGIC then
+    report(string.format(
+        "PROFILE FAIL: did not reach swap %d (status 0x%08X swaps %d perf 0x%08X frame %d)",
+        START_SWAP, s.status_magic, s.swaps, s.perf_magic, s.frame))
+    sys.exit(1)
+end
+
+local totals = {}
+local peaks = {}
+for _, c in ipairs(counters) do
+    totals[c[1]] = 0
+    peaks[c[1]] = 0
+end
+
+local first_swap = s.swaps
+local last_swap = s.swaps
+local first_frame = s.frame
+local last_frame = s.frame
+local samples = 0
+local seen_frame = 0
+deadline = sys.time_ms() + SAMPLE_TIMEOUT_MS
+progress_at = 0
+
+while sys.time_ms() < deadline do
+    s = sample()
+    if s.status_magic ~= STATUS_MAGIC then
+        report(string.format("PROFILE FAIL: status magic changed to 0x%08X", s.status_magic))
+        sys.exit(1)
+    end
+    if s.perf_magic == PERF_MAGIC and s.frame ~= seen_frame then
+        seen_frame = s.frame
+        samples = samples + 1
+        last_swap = s.swaps
+        last_frame = s.frame
+        for _, c in ipairs(counters) do
+            local name = c[1]
+            local value = s[name]
+            totals[name] = totals[name] + value
+            if value > peaks[name] then
+                peaks[name] = value
+            end
+        end
+    end
+    if s.swaps >= END_SWAP then
+        break
+    end
+    if sys.time_ms() >= progress_at then
+        report(string.format(
+            "PROFILE sampling: target swap %d, swaps %d, samples %d, frame %d",
+            END_SWAP, s.swaps, samples, s.frame))
+        progress_at = sys.time_ms() + PROGRESS_INTERVAL_MS
+    end
+    sys.wait_ms(SAMPLE_INTERVAL_MS)
+end
+
+if last_swap < END_SWAP or samples == 0 then
+    report(string.format(
+        "PROFILE FAIL: incomplete profile (%d -> %d swaps, %d samples, frames %d -> %d)",
+        first_swap, last_swap, samples, first_frame, last_frame))
+    sys.exit(1)
+end
+
+report(string.format(
+    "PROFILE PASS: swaps %d -> %d, perf frames %d -> %d, samples %d",
+    first_swap, last_swap, first_frame, last_frame, samples))
+for _, c in ipairs(counters) do
+    local name = c[1]
+    local avg = totals[name] / samples
+    report(string.format("PROFILE %s total %.0f peak %d avg %.2f",
+        name, totals[name], peaks[name], avg))
+end
+
+if dbg.mmio_stats ~= nil then
+    local rows = dbg.mmio_stats()
+    for _, row in ipairs(rows) do
+        if row.reads ~= 0 or row.writes ~= 0 then
+            report(string.format("PROFILE engine_mmio 0x%05X-0x%05X %s reads %d writes %d",
+                row.start, row["end"], row.name or "", row.reads, row.writes))
+        end
+    end
+end
+sys.exit(0)

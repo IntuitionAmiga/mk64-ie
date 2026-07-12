@@ -1,6 +1,7 @@
 #include <ultra64.h>
 #include <macros.h>
 #include "audio/synthesis.h"
+#include "asset_endian.h"
 #include "audio/heap.h"
 #include "audio/data.h"
 #include "audio/load.h"
@@ -277,6 +278,18 @@ Acmd* synthesis_do_one_audio_update(s16* aiBuf, s32 bufLen, Acmd* acmd, s32 upda
         for (j = 0; j < gNumSynthesisReverbs; j++) {
             for (i = 0; i < gMaxSimultaneousNotes; i++) {
                 noteSubEu = &gNoteSubsEu[gMaxSimultaneousNotes * updateIndex + i];
+#ifdef AUDIO_LOAD_TRACE
+                if (noteSubEu->enabled) {
+                    static int slog;
+                    if (slog < 8) {
+                        slog++;
+                        printf("synth sees note: wave %d sampleAddr %p\n",
+                               (int) noteSubEu->isSyntheticWave,
+                               noteSubEu->sound.audioBankSound != NULL
+                                   ? (void*) noteSubEu->sound.audioBankSound : NULL);
+                    }
+                }
+#endif
                 if (noteSubEu->enabled && j == noteSubEu->reverbIndex) {
                     noteIndices[notePos++] = i;
                 }
@@ -405,9 +418,24 @@ Acmd* synthesis_process_note(s32 noteIndex, struct NoteSubEu* noteSubEu, struct 
         audioBookSample = noteSubEu->sound.audioBankSound->sample;
 
         loopInfo = audioBookSample->loop;
-        endPos = __builtin_bswap32(loopInfo->end);
+        endPos = asset_be_u32(&loopInfo->end);
         sampleAddr = audioBookSample->sampleAddr;
         resampledTempLen = 0;
+#ifdef AUDIO_LOAD_TRACE
+        {
+            static int smplog;
+            if (smplog < 6) {
+                smplog++;
+                {
+                    u32* lw = (u32*) loopInfo;
+                    printf("synth sample: addr %p loaded 0x%x end %d loop %p [%x %x %x %x]\n",
+                           (void*) sampleAddr, audioBookSample->loaded, (int) endPos,
+                           (void*) loopInfo, (unsigned) lw[0], (unsigned) lw[1],
+                           (unsigned) lw[2], (unsigned) lw[3]);
+                }
+            }
+        }
+#endif
 
         for (curPart = 0; curPart < nParts; curPart++) {
             bankSample = audioBookSample;
@@ -424,13 +452,28 @@ Acmd* synthesis_process_note(s32 noteIndex, struct NoteSubEu* noteSubEu, struct 
 
             if (curLoadedBook != (*bankSample->book).book) {
                 curLoadedBook = bankSample->book->book;
-                nEntries = (16 * __builtin_bswap32(bankSample->book->order)) * __builtin_bswap32(bankSample->book->npredictors);
+                nEntries = (16 * asset_be_u32(&bankSample->book->order)) * asset_be_u32(&bankSample->book->npredictors);
                 aLoadADPCM(cmd++, nEntries, VIRTUAL_TO_PHYSICAL2(noteSubEu->bookOffset + curLoadedBook));
             }
             if (noteSubEu->bookOffset != 0) {
                 curLoadedBook = &gUnknownData_800F6290[0];
             }
+            {
+            u32 spin_guard = 0;
             while (nAdpcmSamplesProcessed != samplesLenAdjusted) {
+#ifdef AUDIO_LOAD_TRACE
+                if (++spin_guard > 5000) {
+                    printf("adpcm spin: processed %d target %d endPos %d samplePos %d parts %d/%d loaded 0x%x\n",
+                           (int) nAdpcmSamplesProcessed, (int) samplesLenAdjusted,
+                           (int) endPos, (int) synthesisState->samplePosInt,
+                           (int) curPart, (int) nParts, audioBookSample->loaded);
+                    spin_guard = 0;
+                }
+#else
+                if (++spin_guard > 100000u) {
+                    break;
+                }
+#endif
                 noteFinished = 0;
                 restart = 0;
 
@@ -455,10 +498,22 @@ Acmd* synthesis_process_note(s32 noteIndex, struct NoteSubEu* noteSubEu, struct 
                         a1 = samplesRemaining;
                     }
                     loopInfo_2 = (s1 + 0xF) / 16;
-                    if (loopInfo->count != 0) {
+                    if (loopInfo->count != 0
+                        && samplesRemaining >= 0
+                        && asset_be_u32(&loopInfo->start) < endPos) {
                         restart = 1;
                     } else {
+                        /* Degenerate record: the loop start sits at or
+                         * past the end, or the position already
+                         * overshot it - restarting can never make
+                         * progress and the sample counter would walk
+                         * backwards forever (title-hang signature).
+                         * Finish the note instead. */
                         noteFinished = 1;
+                        restart = 0;
+                        if (a1 < 0) {
+                            a1 = 0;
+                        }
                     }
                 }
 
@@ -533,10 +588,11 @@ Acmd* synthesis_process_note(s32 noteIndex, struct NoteSubEu* noteSubEu, struct 
                 if (restart) {
                     synthesisState->restart = 1;
                     ////printf("loopInfo->start %08x\n", loopInfo->start);
-                    synthesisState->samplePosInt = __builtin_bswap32(loopInfo->start);
+                    synthesisState->samplePosInt = asset_be_u32(&loopInfo->start);
                 } else {
                     synthesisState->samplePosInt += nSamplesToProcess;
                 }
+            }
             }
 
             switch (nParts) {

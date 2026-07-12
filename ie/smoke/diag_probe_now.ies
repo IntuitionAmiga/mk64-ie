@@ -1,0 +1,32 @@
+-- One-shot, freeze-free race probe. Run via F8 WHILE a race is on screen.
+-- No dbg.freeze (that deadlocks mid-swap); plain bus reads + a screenshot.
+-- Prints the packed-DL unpack seek counters so we can see if the course
+-- display-list desynced/ran away (the source of the stray triangles).
+
+local CUR_COURSE_ADDR  = 0x1105f690
+local SGFX_SEEK_ADDR   = 0x11111c1c
+local SPACKED_SEEK_ADDR= 0x11111c20
+local UNPACK_BUF_SIZE     = 51008
+local UNPACKED_DL_ENTRIES = 6377
+
+local function rd_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local course  = rd_be32(CUR_COURSE_ADDR)
+local gfxseek = rd_be32(SGFX_SEEK_ADDR)
+local pkseek  = rd_be32(SPACKED_SEEK_ADDR)
+
+rec.screenshot("build/ie/diag_probe.png")
+
+sys.print(string.format("PROBE: course=%d sGfxSeek=%d/%d (%.1f%%) sPackedSeek=%d/%d (%.1f%%)",
+    course,
+    gfxseek, UNPACKED_DL_ENTRIES, 100.0 * gfxseek / UNPACKED_DL_ENTRIES,
+    pkseek, UNPACK_BUF_SIZE, 100.0 * pkseek / UNPACK_BUF_SIZE))
+if gfxseek >= UNPACKED_DL_ENTRIES - 4 then
+    sys.print("PROBE: *** sGfxSeek at buffer cap -> unpack RAN AWAY (desync confirmed) ***")
+end
+if pkseek >= UNPACK_BUF_SIZE - 8 then
+    sys.print("PROBE: *** sPackedSeek off end of UNPACK_BUF -> no 0xFF terminator ***")
+end

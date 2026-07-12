@@ -553,7 +553,7 @@ s32 validate_save_data_checksum_backup(void) {
 
     return 0;
 }
-extern int vmu_status(int channel);
+
 // Check if controller has a Controller Pak connected.
 // Return PAK if it does, otherwise return NO_PAK.
 #include <stdio.h>

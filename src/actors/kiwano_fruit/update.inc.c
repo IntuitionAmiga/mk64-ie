@@ -2,7 +2,6 @@
 #include <main.h>
 #include <defines.h>
 #include <path.h>
-#include <kos.h>
 /**
  * @brief Updates the kiwano fruit actor.
  * Actor used in DK's Jungle Parkway.

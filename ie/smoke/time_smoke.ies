@@ -1,0 +1,71 @@
+-- Stage 3 timing/frame-pacing smoke.
+--
+-- Run: make ie-time-smoke
+--
+-- Verifies platform_time_ns monotonicity and that the measured VBlank
+-- period is a sane frame rate (headless vblank runs ~120 Hz with
+-- jitter; accept 7000..33334 us).
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local WANT_CHECKS = 0x7
+local PERIOD_MIN_US = 7000
+local PERIOD_MAX_US = 33334
+local TIMEOUT_MS = 20000
+local SAMPLE_MS = 100
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+-- dbg.freeze() halts the CPU and only dbg.close() restarts it; wrap
+-- every sample in open/close (see STAGE3-NOTES.md).
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local checks = read_be32(STATUS_ADDR + 16)
+    local busy = read_be32(STATUS_ADDR + 20)
+    local period = read_be32(STATUS_ADDR + 24)
+    dbg.resume()
+    dbg.close()
+    return magic, checks, busy, period
+end
+
+local deadline = sys.time_ms() + TIMEOUT_MS
+local magic, checks, busy, period = 0, 0, 0, 0
+
+while sys.time_ms() < deadline do
+    magic, checks, busy, period = sample()
+    if magic == MAGIC then
+        break
+    end
+    sys.wait_ms(SAMPLE_MS)
+end
+
+sys.wait_ms(500)
+
+if magic ~= MAGIC then
+    sys.print(string.format("SMOKE FAIL: no boot magic (read 0x%08X)", magic))
+    sys.exit(1)
+end
+if checks ~= WANT_CHECKS then
+    sys.print(string.format("SMOKE FAIL: time checks 0x%X, want 0x%X", checks, WANT_CHECKS))
+    sys.exit(1)
+end
+if busy == 0 then
+    sys.print("SMOKE FAIL: busy-loop time delta is zero")
+    sys.exit(1)
+end
+if period < PERIOD_MIN_US or period > PERIOD_MAX_US then
+    sys.print(string.format("SMOKE FAIL: frame period %dus outside %d..%dus",
+                            period, PERIOD_MIN_US, PERIOD_MAX_US))
+    sys.exit(1)
+end
+
+sys.print(string.format(
+    "SMOKE PASS: time monotonic (busy=%dus), vblank period %dus", busy, period))
+sys.exit(0)

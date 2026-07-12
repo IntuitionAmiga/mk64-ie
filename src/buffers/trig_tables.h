@@ -1,26 +1,19 @@
 #ifndef TRIG_TABLES_H
 #define TRIG_TABLES_H
 
+#include <PR/ultratypes.h>
+
 /*
- * The sine and cosine tables overlap, but "#define gCosineTable (gSineTable +
- * 0x400)" doesn't give expected codegen; gSineTable and gCosineTable need to
- * be different symbols for code to match. Most likely the tables were placed
- * adjacent to each other, and gSineTable cut short, such that reads overflow
- * into gCosineTable.
- *
- * These kinds of out of bounds reads are undefined behavior, and break on
- * e.g. GCC (which doesn't place the tables next to each other, and probably
- * exploits array sizes for range analysis-based optimizations as well).
- * Thus, for non-IDO compilers we use the standard-compliant version.
+ * On N64 the sine and cosine tables overlapped: gSineTable was cut
+ * short and reads overflowed into an adjacent gCosineTable, which is
+ * undefined behavior under separate arrays. Here the full 0x1400
+ * entries live in one array and gCosineTable is a pointer offset a
+ * quarter turn (0x400 entries) into it, so every coss() read stays
+ * inside the array and is well-defined.
  */
-#if 0
-extern f32 gSineTable[];
-#ifdef AVOID_UB
+extern const f32 gSineTable[0x1400];
 #define gCosineTable (gSineTable + 0x400)
-#else
-extern f32 gCosineTable[];
-#endif
-#endif
-extern s16 gArctanTable[];
+
+extern const s16 gArctanTable[0x401];
 
 #endif

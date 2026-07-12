@@ -1524,8 +1524,6 @@ s32 is_character_spot_free(s32 gridId) {
 }
 
 
-void draw_vmu_icon(int controller, int charid);
-
 /**
  * Navigation of the player select screen
  * Grid positions are from right to left, then top to bottom
@@ -1564,9 +1562,8 @@ void player_select_menu_act(struct Controller* controller, u16 controllerIdx) {
             
                 if ((btnAndStick & A_BUTTON) && (gCharacterGridIsSelected[controllerIdx] == 0)) {
                     gCharacterGridIsSelected[controllerIdx] = 1;
-                    draw_vmu_icon(controllerIdx, ((sCharacterGridOrder - 1)[gCharacterGridSelections[controllerIdx]]));
 
-                    func_800C90F4(controllerIdx, 
+                    func_800C90F4(controllerIdx,
                         ((sCharacterGridOrder - 1)[gCharacterGridSelections[controllerIdx]] * 0x10) + 0x2900800E);
                 }
 

@@ -1,0 +1,86 @@
+-- FPS measurement over a fixed attract demo-race span.
+--
+-- The attract loop enters its first demo race (gGamestate == RACING,
+-- gDemoMode == 1) around swap 535 and leaves it around swap 1547
+-- (probed 2026-07-05). Span 700..1400 sits inside that race,
+-- clear of the course-intro camera and the fade-out. Same
+-- fixed-swap-span methodology as fps_measure.ies: swap counts map to
+-- scene content, so numbers are comparable across builds.
+--
+-- Run: make ie-race-fps
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+-- @GAMESTATE_ADDR@ is substituted from the fresh game.map when the
+-- Makefile instantiates this template into $(IE_BUILD_DIR).
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@ -- s32 gGamestate; RACING == 4
+local SPAN_START = 700
+local SPAN_END = 1400
+local WARMUP_TIMEOUT_MS = 480000
+local POLL_MS = 250
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local swaps = read_be32(STATUS_ADDR + 16)
+    local state = read_be32(GAMESTATE_ADDR)
+    dbg.resume()
+    dbg.close()
+    return magic, swaps, state
+end
+
+-- Warm up: run until the demo race reaches the start of the span.
+local deadline = sys.time_ms() + WARMUP_TIMEOUT_MS
+local start_ms = nil
+local swaps = 0
+local state = -1
+while sys.time_ms() < deadline do
+    local magic
+    magic, swaps, state = sample()
+    if magic == MAGIC and swaps >= SPAN_START then
+        start_ms = sys.time_ms()
+        break
+    end
+    sys.wait_ms(POLL_MS)
+end
+
+if start_ms == nil then
+    sys.print(string.format("RACE FPS FAIL: swap %d never reached %d before timeout", swaps, SPAN_START))
+    sys.exit(1)
+end
+if state ~= 4 then
+    sys.print(string.format("RACE FPS FAIL: span start at swap %d but gamestate=%d (want RACING=4)", swaps, state))
+    sys.exit(1)
+end
+local span_start = swaps -- may overshoot SPAN_START by a poll interval
+
+-- Measure: wall time until the end of the span; the scene must stay
+-- in the demo race for the whole span.
+while true do
+    local magic
+    magic, swaps, state = sample()
+    if magic ~= MAGIC then
+        sys.print("RACE FPS FAIL: status block lost during measurement")
+        sys.exit(1)
+    end
+    if state ~= 4 then
+        sys.print(string.format("RACE FPS FAIL: left RACING at swap %d before span end", swaps))
+        sys.exit(1)
+    end
+    if swaps >= SPAN_END then
+        break
+    end
+    sys.wait_ms(POLL_MS)
+end
+
+local elapsed_s = (sys.time_ms() - start_ms) / 1000.0
+local fps = (swaps - span_start) / elapsed_s
+sys.print(string.format("RACE FPS: %.2f (swaps %d -> %d in %.1f s)",
+    fps, span_start, swaps, elapsed_s))
+sys.exit(0)

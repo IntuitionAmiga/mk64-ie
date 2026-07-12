@@ -72,6 +72,29 @@ typedef struct {
 extern u16 gRandomSeed16;
 extern u8 randomSeedPadding[216];
 extern union_D_802BFB80 D_802BFB80;
+
+/*
+ * With the gfx service (IE_GFX_SVC) one frame can be in flight on the
+ * worker while the game builds the next one. The per-frame kart texture
+ * decodes would overwrite pixels the in-flight display list still
+ * references, so the decode/render path in render_player.c goes through
+ * KART_TEXTURE_ARENA: a frame-parity double buffer flipped once per
+ * enqueued frame by the service client. Kart sprites are only re-decoded
+ * when their billboard angle moves past a threshold, so a skipped kart is
+ * not current in the freshly selected copy; render_kart/render_ghost copy
+ * such a slot forward from the other copy before reading it (see
+ * kart_arena_sync_slot in render_player.c). Other D_802BFB80 users (menus
+ * via arraySize4, staff-ghost replay
+ * scratch) keep the primary arena: their contents must persist across
+ * frames and their producers are transition-time (drained explicitly).
+ */
+#ifdef IE_GFX_SVC
+extern union_D_802BFB80 D_802BFB80_svcAlt;
+extern u32 gIeGfxKartParity;
+#define KART_TEXTURE_ARENA (*(gIeGfxKartParity ? &D_802BFB80_svcAlt : &D_802BFB80))
+#else
+#define KART_TEXTURE_ARENA D_802BFB80
+#endif
 extern struct_D_802DFB80 gEncodedKartTexture[][2][8];
 
 /**

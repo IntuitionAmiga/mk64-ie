@@ -1,0 +1,154 @@
+-- Deterministic mk64 visual classifier for engine bisects.
+--
+-- Boots into the attract race, waits for an early RACING swap, then emits a
+-- compact visual signature: full-frame hash, coarse sampled luminance, a few
+-- region hashes, and a screenshot. It avoids debugger freeze after entering
+-- RACING so it does not stall the Voodoo swap path.
+
+local STATUS_ADDR      = 0x0009F000
+local MAGIC            = 0x4D4B3634 -- 'MK64'
+local GAMESTATE_ADDR   = 0x10619d20 -- gGamestate; RACING == 4
+local TARGET_SWAP      = TARGET_SWAP or 535
+local REQUIRE_RACING   = REQUIRE_RACING or false
+local WARMUP_MS        = WARMUP_MS or 480000
+local POLL_MS          = POLL_MS or 500
+local SETTLE_MS        = SETTLE_MS or 2000
+local SHOT_PATH        = SHOT_PATH or "build/ie/mk64_visual_classifier.png"
+local REPORT_PATH      = REPORT_PATH or "build/ie/mk64_visual_classifier.txt"
+local TRACE_PATH       = TRACE_PATH or "build/ie/mk64_voodoo_trace.txt"
+local TRACE_EVENTS     = TRACE_EVENTS or 5000
+local DO_SCREENSHOT    = DO_SCREENSHOT or false
+local DUMP_TRACE       = DUMP_TRACE or false
+
+local trace_ok = false
+
+local function rd_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample_status()
+    dbg.open()
+    dbg.freeze()
+    local magic = rd_be32(STATUS_ADDR)
+    local swaps = rd_be32(STATUS_ADDR + 16)
+    local state = rd_be32(GAMESTATE_ADDR)
+    dbg.resume()
+    dbg.close()
+    return magic, swaps, state
+end
+
+local function fnv1a_bytes(s)
+    local h = 2166136261
+    for i = 1, #s do
+        h = bit32.bxor(h, string.byte(s, i))
+        h = (h * 16777619) % 4294967296
+    end
+    return h
+end
+
+local function region_hash(x, y, w, h)
+    return fnv1a_bytes(video.get_region(x, y, w, h))
+end
+
+local function probe_region_hash(x, y, w, h, fb_w, fb_h)
+    if w > fb_w then w = fb_w end
+    if h > fb_h then h = fb_h end
+    if x < 0 then x = 0 end
+    if y < 0 then y = 0 end
+    if x + w > fb_w then x = fb_w - w end
+    if y + h > fb_h then y = fb_h - h end
+    return region_hash(x, y, w, h)
+end
+
+local function sample_grid()
+    local w, h = video.get_dimensions()
+    local nonblack = 0
+    local bright = 0
+    local rgb_sum = 0
+    local samples = 0
+    for gy = 1, 5 do
+        for gx = 1, 7 do
+            local x = math.floor((gx * w) / 8)
+            local y = math.floor((gy * h) / 6)
+            local r, g, b, a = video.get_pixel(x, y)
+            local lum = r + g + b
+            samples = samples + 1
+            rgb_sum = rgb_sum + lum
+            if lum ~= 0 then nonblack = nonblack + 1 end
+            if lum > 384 then bright = bright + 1 end
+        end
+    end
+    return samples, nonblack, bright, rgb_sum
+end
+
+local deadline = sys.time_ms() + WARMUP_MS
+local magic, swaps, state = 0, 0, -1
+local polls = 0
+while sys.time_ms() < deadline do
+    magic, swaps, state = sample_status()
+    if magic == MAGIC and swaps >= TARGET_SWAP and (not REQUIRE_RACING or state == 4) then
+        break
+    end
+    polls = polls + 1
+    if polls % 10 == 0 then
+        sys.print(string.format("MK64_VISUAL warmup magic=0x%08X swaps=%d state=%d target=%d",
+            magic, swaps, state, TARGET_SWAP))
+    end
+    sys.wait_ms(POLL_MS)
+end
+
+if not (magic == MAGIC and swaps >= TARGET_SWAP and (not REQUIRE_RACING or state == 4)) then
+    local msg = string.format("MK64_VISUAL_FAIL warmup magic=0x%08X swaps=%d state=%d target=%d",
+        magic, swaps, state, TARGET_SWAP)
+    sys.print(msg)
+    sys.write_file(REPORT_PATH, msg .. "\n")
+    sys.exit(1)
+end
+
+if video.voodoo_trace_start ~= nil then
+    trace_ok = video.voodoo_trace_start(TRACE_EVENTS)
+end
+sys.print(string.format("MK64_VISUAL trigger swaps=%d state=%d trace=%s", swaps, state, tostring(trace_ok)))
+sys.wait_ms(SETTLE_MS)
+
+sys.print("MK64_VISUAL hashing")
+local frame_hash = video.frame_hash()
+local dim_w, dim_h = video.get_dimensions()
+local samples, nonblack, bright, rgb_sum = sample_grid()
+sys.print("MK64_VISUAL region hashes")
+local top_hash = probe_region_hash(math.floor(dim_w / 2) - 64, math.floor(dim_h / 8), 128, 64, dim_w, dim_h)
+local mid_hash = probe_region_hash(math.floor(dim_w / 2) - 64, math.floor(dim_h / 2) - 64, 128, 128, dim_w, dim_h)
+local road_hash = probe_region_hash(math.floor(dim_w / 2) - 96, math.floor(dim_h * 2 / 3) - 48, 192, 96, dim_w, dim_h)
+
+local trace = ""
+if trace_ok and video.voodoo_trace_dump ~= nil then
+    if video.voodoo_trace_stop ~= nil then
+        video.voodoo_trace_stop()
+    end
+    if video.voodoo_trace_summary ~= nil then
+        sys.print("MK64_TRACE_SUMMARY_BEGIN")
+        sys.print(video.voodoo_trace_summary())
+        sys.print("MK64_TRACE_SUMMARY_END")
+    end
+    if DUMP_TRACE then
+        sys.print("MK64_VISUAL trace dump")
+        trace = video.voodoo_trace_dump(true)
+        sys.print(string.format("MK64_VISUAL trace bytes=%d", #trace))
+        sys.print("MK64_TRACE_BEGIN")
+        sys.print(trace)
+        sys.print("MK64_TRACE_END")
+    end
+end
+
+if DO_SCREENSHOT then
+    sys.print("MK64_VISUAL screenshot")
+    rec.screenshot(SHOT_PATH)
+end
+
+local report = string.format(
+    "MK64_VISUAL swaps=%d state=%d dim=%dx%d frame_hash=0x%08X samples=%d nonblack=%d bright=%d rgb_sum=%d top=0x%08X mid=0x%08X road=0x%08X screenshot=%s shot=%s trace=%s trace_bytes=%d\n",
+    swaps, state, dim_w, dim_h, frame_hash, samples, nonblack, bright, rgb_sum,
+    top_hash, mid_hash, road_hash, tostring(DO_SCREENSHOT), SHOT_PATH, TRACE_PATH, #trace)
+sys.print(report)
+sys.exit(0)

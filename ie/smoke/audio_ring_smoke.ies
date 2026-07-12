@@ -1,0 +1,88 @@
+-- Stage 3 audio sink smoke: the AudioAPI backend streams a sustained
+-- tone through the SFX ring. Verifies sustained playback and ring
+-- continuity over a bounded window: the channel stays in the playing
+-- state with no error, samples keep flowing at roughly the configured
+-- rate, and no underruns accumulate after warm-up.
+--
+-- Run: make ie-audio-ring-smoke
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local RATE = 13400 -- must match IE_AUDIO_RATE / RATE_HZ in ie/
+local TIMEOUT_MS = 15000
+local MEASURE_MS = 3000
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+-- dbg.freeze() halts the CPU and only dbg.close() restarts it; wrap
+-- every sample in open/close (see STAGE3-NOTES.md).
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local sfx = read_be32(STATUS_ADDR + 16)
+    local written = read_be32(STATUS_ADDR + 20)
+    local buffered = read_be32(STATUS_ADDR + 24)
+    local underruns = read_be32(STATUS_ADDR + 28)
+    dbg.resume()
+    dbg.close()
+    return magic, sfx, written, buffered, underruns
+end
+
+local deadline = sys.time_ms() + TIMEOUT_MS
+local magic, sfx, written, buffered, underruns = 0, 0, 0, 0, 0
+while sys.time_ms() < deadline do
+    magic, sfx, written, buffered, underruns = sample()
+    if magic == MAGIC and written > 0 then
+        break
+    end
+    sys.wait_ms(100)
+end
+
+if magic ~= MAGIC then
+    sys.print(string.format("SMOKE FAIL: no boot magic (read 0x%08X)", magic))
+    sys.exit(1)
+end
+
+-- Measure flow over a bounded window.
+local t0 = sys.time_ms()
+local w0 = written
+sys.wait_ms(MEASURE_MS)
+local _, sfx2, written2, buffered2, underruns2 = sample()
+local elapsed = sys.time_ms() - t0
+local rate = (written2 - w0) * 1000 / elapsed
+
+sys.wait_ms(300)
+
+if sfx2 % 2 ~= 1 then
+    sys.print(string.format("SMOKE FAIL: SFX channel not playing (status 0x%X)", sfx2))
+    sys.exit(1)
+end
+if math.floor(sfx2 / 2) % 2 == 1 then
+    sys.print(string.format("SMOKE FAIL: SFX channel error (status 0x%X)", sfx2))
+    sys.exit(1)
+end
+if written2 <= w0 then
+    sys.print("SMOKE FAIL: sample flow stalled")
+    sys.exit(1)
+end
+-- The guest paces itself against the RTC, so flow should sit near the
+-- configured rate (generous band: interpreter speed varies).
+if rate < RATE * 0.5 or rate > RATE * 2.0 then
+    sys.print(string.format("SMOKE FAIL: sample rate %d/s outside band (want ~%d)", rate, RATE))
+    sys.exit(1)
+end
+if underruns2 > 0 then
+    sys.print(string.format("SMOKE FAIL: %d ring underruns after warm-up", underruns2))
+    sys.exit(1)
+end
+
+sys.print(string.format(
+    "SMOKE PASS: audio ring continuous (%d samples/s, buffered %d, no underruns)",
+    rate, buffered2))
+sys.exit(0)

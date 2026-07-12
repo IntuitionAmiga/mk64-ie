@@ -1,0 +1,21 @@
+local function frozen(fn)
+    cpu.freeze()
+    local ok, v = pcall(fn)
+    cpu.resume()
+    if not ok then sys.print("ERR "..tostring(v)) sys.exit(1) end
+    return v
+end
+local function rd32(addr)
+    return frozen(function()
+        return mem.read8(addr)*0x1000000 + mem.read8(addr+1)*0x10000 + mem.read8(addr+2)*0x100 + mem.read8(addr+3)
+    end)
+end
+sys.wait_ms(25000)
+for i = 1, 5 do
+    sys.print(string.format("pumps=%d phase=%d load=%d ring6_head=%d ring6_tail=%d",
+        rd32(0x9EFD0), rd32(0x9EFD8), rd32(0x9EFCC),
+        frozen(function() return mem.read8(0x791200) end),
+        frozen(function() return mem.read8(0x791201) end)))
+    sys.wait_ms(1000)
+end
+sys.exit(0)

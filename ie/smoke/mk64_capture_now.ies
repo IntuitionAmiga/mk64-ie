@@ -1,0 +1,78 @@
+-- Immediate mk64 visual/Voodoo capture. Use from F8/IEMon once the race scene
+-- is visible, or as a short script after another harness has positioned the game.
+
+local STATUS_ADDR = 0x0009F000
+local SHOT_PATH   = SHOT_PATH or "build/ie/mk64_capture_now.png"
+local REPORT_PATH = REPORT_PATH or "build/ie/mk64_capture_now.txt"
+local TRACE_PATH  = TRACE_PATH or "build/ie/mk64_capture_now_trace.txt"
+local TRACE_WAIT_MS = TRACE_WAIT_MS or 250
+local TRACE_EVENTS = TRACE_EVENTS or 250
+local DO_SCREENSHOT = DO_SCREENSHOT or false
+
+local function rd_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function fnv1a_bytes(s)
+    local h = 2166136261
+    for i = 1, #s do
+        h = bit32.bxor(h, string.byte(s, i))
+        h = (h * 16777619) % 4294967296
+    end
+    return h
+end
+
+local function region_hash(x, y, w, h)
+    return fnv1a_bytes(video.get_region(x, y, w, h))
+end
+
+local function probe_region_hash(x, y, rw, rh, fb_w, fb_h)
+    if rw > fb_w then rw = fb_w end
+    if rh > fb_h then rh = fb_h end
+    if x < 0 then x = 0 end
+    if y < 0 then y = 0 end
+    if x + rw > fb_w then x = fb_w - rw end
+    if y + rh > fb_h then y = fb_h - rh end
+    return region_hash(x, y, rw, rh)
+end
+
+local trace_ok = false
+if video.voodoo_trace_start ~= nil then
+    trace_ok = video.voodoo_trace_start(TRACE_EVENTS)
+    sys.wait_ms(TRACE_WAIT_MS)
+end
+
+local w, h = video.get_dimensions()
+local frame_hash = video.frame_hash()
+local top_hash = probe_region_hash(math.floor(w / 2) - 64, math.floor(h / 8), 128, 64, w, h)
+local mid_hash = probe_region_hash(math.floor(w / 2) - 64, math.floor(h / 2) - 64, 128, 128, w, h)
+local road_hash = probe_region_hash(math.floor(w / 2) - 96, math.floor(h * 2 / 3) - 48, 192, 96, w, h)
+local magic = rd_be32(STATUS_ADDR)
+local swaps = rd_be32(STATUS_ADDR + 16)
+
+local trace = ""
+if trace_ok and video.voodoo_trace_dump ~= nil then
+    if video.voodoo_trace_stop ~= nil then
+        video.voodoo_trace_stop()
+    end
+    if video.voodoo_trace_summary ~= nil then
+        sys.print("MK64_TRACE_SUMMARY_BEGIN")
+        sys.print(video.voodoo_trace_summary())
+        sys.print("MK64_TRACE_SUMMARY_END")
+    end
+    trace = video.voodoo_trace_dump(true)
+    sys.print("MK64_TRACE_BEGIN")
+    sys.print(trace)
+    sys.print("MK64_TRACE_END")
+end
+
+if DO_SCREENSHOT then
+    rec.screenshot(SHOT_PATH)
+end
+
+local report = string.format(
+    "MK64_CAPTURE_NOW magic=0x%08X swaps=%d dim=%dx%d frame_hash=0x%08X top=0x%08X mid=0x%08X road=0x%08X screenshot=%s shot=%s trace=%s trace_bytes=%d\n",
+    magic, swaps, w, h, frame_hash, top_hash, mid_hash, road_hash, tostring(DO_SCREENSHOT), SHOT_PATH, TRACE_PATH, #trace)
+sys.print(report)
+sys.exit(0)

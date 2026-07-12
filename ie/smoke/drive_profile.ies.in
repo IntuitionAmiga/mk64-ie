@@ -1,0 +1,187 @@
+-- Manual-driving performance profile.
+--
+-- Unlike counter_profile.ies (early title window) and race_fps_lite
+-- (demo attract race), this waits for a MANUAL race: start the game
+-- windowed, pick a course, and drive. Once gGamestate == RACING the
+-- script brackets a driving window, accumulating the guest per-frame
+-- event counters (needs a game image built with IE_PERF_COUNTERS=1)
+-- and the engine's subsystem time accounting (needs IE_PERF_ACCT=1 in
+-- the environment). 1Hz sampling: per-freeze stalls depress windowed
+-- fps at higher rates, so numbers are for cost ranking, not absolutes.
+--
+-- Run:
+--   make IE_PERF_COUNTERS=1 build/ie/mariokart64.ie68
+--   env IE_PERF_ACCT=1 IE_NO_IPC=1 IE_M68K_JIT_DISPATCH_HASH=0 \
+--     ../IntuitionEngine/bin/IntuitionEngine -file-root . \
+--     build/ie/mariokart64.ie68 -script build/ie/drive_profile.ies
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634 -- 'MK64'
+local PERF_ADDR = 0x0009F100
+local PERF_MAGIC = 0x50455246 -- 'PERF'
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@ -- s32 gGamestate; RACING == 4
+
+local RACE_WAIT_TIMEOUT_MS = 600000 -- user has to boot + navigate menus
+local SETTLE_SWAPS = 400            -- past intro pan + countdown, whatever the fps
+local SETTLE_TIMEOUT_MS = 180000
+local SAMPLE_COUNT = 30
+local SAMPLE_INTERVAL_MS = 1000
+
+local counters = {
+    { "texrects", 0 },
+    { "tris", 1 },
+    { "tex_imports", 2 },
+    { "tex_stream_bytes", 3 },
+    { "draw_calls", 4 },
+    { "mmio_writes", 5 },
+    { "cmd_submits", 6 },
+    { "cmd_pairs", 7 },
+    { "clipped_tris", 8 },
+    { "audio_voice_writes", 9 },
+    { "vtx_mtx_reuse", 10 },
+    { "memcpy_0_63", 11 },
+    { "memcpy_64_255", 12 },
+    { "memcpy_256_1023", 13 },
+    { "memcpy_1024_plus", 14 },
+}
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    local out = {}
+
+    dbg.open()
+    dbg.freeze()
+    out.status_magic = read_be32(STATUS_ADDR)
+    out.swaps = read_be32(STATUS_ADDR + 16)
+    out.state = read_be32(GAMESTATE_ADDR)
+    out.perf_magic = read_be32(PERF_ADDR)
+    out.frame = read_be32(PERF_ADDR + 4)
+    for _, c in ipairs(counters) do
+        out[c[1]] = read_be32(PERF_ADDR + 8 + c[2] * 4)
+    end
+    dbg.resume()
+    dbg.close()
+    return out
+end
+
+-- Wait for the user to reach a race.
+sys.print("DRIVE PROFILE: waiting for a manual race - pick a course and DRIVE")
+local deadline = sys.time_ms() + RACE_WAIT_TIMEOUT_MS
+local s = nil
+while sys.time_ms() < deadline do
+    s = sample()
+    if s.status_magic == STATUS_MAGIC and s.state == 4 then
+        break
+    end
+    sys.wait_ms(2000)
+end
+if s == nil or s.status_magic ~= STATUS_MAGIC or s.state ~= 4 then
+    sys.print("DRIVE PROFILE FAIL: no race reached before timeout")
+    sys.exit(1)
+end
+if s.perf_magic ~= PERF_MAGIC then
+    sys.print("DRIVE PROFILE FAIL: no PERF block - rebuild with IE_PERF_COUNTERS=1")
+    sys.exit(1)
+end
+
+-- The race state flips at the start of the course intro pan; wait a
+-- fixed number of SWAPS (not wall time) so sampling starts after the
+-- pan and countdown at any frame rate.
+local settle_target = s.swaps + SETTLE_SWAPS
+sys.print(string.format(
+    "DRIVE PROFILE: race detected at swap %d, settling until swap %d (intro pan + countdown)...",
+    s.swaps, settle_target))
+deadline = sys.time_ms() + SETTLE_TIMEOUT_MS
+while sys.time_ms() < deadline do
+    sys.wait_ms(2000)
+    s = sample()
+    if s.state ~= 4 then
+        sys.print("DRIVE PROFILE FAIL: left the race during settle")
+        sys.exit(1)
+    end
+    if s.swaps >= settle_target then
+        break
+    end
+end
+if s.swaps < settle_target then
+    sys.print("DRIVE PROFILE FAIL: settle timeout before reaching driving window")
+    sys.exit(1)
+end
+
+if sys.perf_reset ~= nil then
+    sys.perf_reset()
+end
+
+local totals = {}
+local peaks = {}
+for _, c in ipairs(counters) do
+    totals[c[1]] = 0
+    peaks[c[1]] = 0
+end
+
+local t0 = sys.time_ms()
+local first = sample()
+local last = first
+local samples = 0
+local seen_frame = first.frame
+
+sys.print(string.format("DRIVE PROFILE: sampling %d x %dms - KEEP DRIVING",
+    SAMPLE_COUNT, SAMPLE_INTERVAL_MS))
+
+for i = 1, SAMPLE_COUNT do
+    sys.wait_ms(SAMPLE_INTERVAL_MS)
+    s = sample()
+    if s.status_magic ~= STATUS_MAGIC then
+        sys.print("DRIVE PROFILE FAIL: status block lost")
+        sys.exit(1)
+    end
+    if s.state ~= 4 then
+        sys.print(string.format(
+            "DRIVE PROFILE: race left early (state=%d) - stopping at sample %d", s.state, i))
+        break
+    end
+    if s.perf_magic == PERF_MAGIC and s.frame ~= seen_frame then
+        seen_frame = s.frame
+        samples = samples + 1
+        for _, c in ipairs(counters) do
+            local name = c[1]
+            local value = s[name]
+            totals[name] = totals[name] + value
+            if value > peaks[name] then
+                peaks[name] = value
+            end
+        end
+    end
+    last = s
+end
+
+local elapsed_s = (sys.time_ms() - t0) / 1000.0
+if samples == 0 then
+    sys.print("DRIVE PROFILE FAIL: no perf frames sampled")
+    sys.exit(1)
+end
+
+local fps = (last.swaps - first.swaps) / elapsed_s
+sys.print(string.format(
+    "DRIVE PROFILE PASS: %.2f fps (swaps %d -> %d in %.1f s), %d perf-frame samples",
+    fps, first.swaps, last.swaps, elapsed_s, samples))
+for _, c in ipairs(counters) do
+    local name = c[1]
+    sys.print(string.format("DRIVE %s avg/frame %.2f peak %d",
+        name, totals[name] / samples, peaks[name]))
+end
+
+if sys.perf_report ~= nil then
+    local perf = sys.perf_report()
+    if perf ~= nil and perf ~= "" then
+        sys.print("ENGINE SPAN REPORT (IE_PERF_ACCT=1):")
+        sys.print(perf)
+    else
+        sys.print("ENGINE SPAN REPORT empty - run with IE_PERF_ACCT=1")
+    end
+end
+sys.exit(0)

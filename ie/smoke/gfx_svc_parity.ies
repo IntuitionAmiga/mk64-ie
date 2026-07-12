@@ -1,0 +1,64 @@
+-- Phase 1 parity oracle, deterministic per-swap variant. Requires the
+-- engine run with IE_SWAP_HASH=1: the Voodoo swap worker then records an
+-- FNV-1a hash of every presented frame, keyed by swap sequence number
+-- (MMIO regs SEQ 0xF8358 / QUERY 0xF835C / VALUE 0xF8360). Hash N is the
+-- guest's Nth swap regardless of compositor timing, so two runs with
+-- identical swap streams must produce identical "PARITY sample" lines.
+-- make ie-gfx-svc-parity runs a local-path pack and an IE_GFX_SVC pack
+-- and diffs the captured lines per swap count.
+-- The guest itself goes non-deterministic partway through the attract demo
+-- (state drifts with run timing). The drift onset has moved earlier as the
+-- game got faster: 2026-07-11 local-vs-local was stable to swap 800; by
+-- 2026-07-12 local-vs-local diverged at 700 and local-vs-service by 560
+-- (interleaved same/diff hashes from ~560 - the two runs' animations fall
+-- out of phase, which is drift, not a rendering fault; verified with a
+-- per-swap onset sweep, ie/smoke/parity_onset.ies). Samples stay inside
+-- the window that is stable across ALL configurations.
+local SAMPLES = { 150, 300, 450 }
+
+local SEQ = 0x000F8358
+local QUERY = 0x000F835C
+local VALUE = 0x000F8360
+
+local function frozen(fn)
+    cpu.freeze()
+    local ok, v = pcall(fn)
+    cpu.resume()
+    if not ok then
+        sys.print("SCRIPT ERROR: " .. tostring(v))
+        sys.exit(1)
+    end
+    return v
+end
+
+local function seq()
+    return frozen(function() return mem.read32(SEQ) end)
+end
+
+local function hash_of(n)
+    return frozen(function()
+        mem.write32(QUERY, n)
+        return mem.read32(VALUE)
+    end)
+end
+
+local deadline = sys.time_ms() + 60000
+while seq() == 0 and sys.time_ms() < deadline do sys.wait_ms(200) end
+if seq() == 0 then
+    sys.print("PARITY TIMEOUT: no swaps (IE_SWAP_HASH=1 set?)")
+    sys.exit(1)
+end
+
+for _, target in ipairs(SAMPLES) do
+    deadline = sys.time_ms() + 120000
+    while seq() < target and sys.time_ms() < deadline do sys.wait_ms(2) end
+    local h = hash_of(target)
+    if h == 0 then
+        sys.print(string.format("PARITY EVICTED swap=%d (sampler too slow)", target))
+    else
+        sys.print(string.format("PARITY sample swap=%d hash=%08x", target, h))
+    end
+end
+
+sys.print("PARITY DONE")
+sys.exit(0)

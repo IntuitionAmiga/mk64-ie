@@ -1,0 +1,25 @@
+local function frozen(fn)
+    cpu.freeze()
+    local ok, v = pcall(fn)
+    cpu.resume()
+    if not ok then return -1 end
+    return v
+end
+local function rd8(a) return frozen(function() return mem.read8(a) end) end
+local function rd32(addr)
+    return frozen(function()
+        return mem.read8(addr)*0x1000000 + mem.read8(addr+1)*0x10000 + mem.read8(addr+2)*0x100 + mem.read8(addr+3)
+    end)
+end
+local deadline = sys.time_ms() + 40000
+while rd32(0x9EFC0) ~= 0x41535643 and sys.time_ms() < deadline do sys.wait_ms(500) end
+local seqp = rd32(0x9EFC4)
+sys.print(string.format("seqp=%08x", seqp))
+for i = 1, 20 do
+    -- enabled is bit 0 of byte 0 of each SequencePlayer (bitfield, BE: MSB first -> enabled:1 is top bit)
+    sys.print(string.format("t=%ds sp0=%02x sp1=%02x sp2=%02x pumps=%d usec=%d prod=%d",
+        i, rd8(seqp), rd8(seqp + 0x1A0), rd8(seqp + 0x340),
+        rd32(0x9EFD0), rd32(0x9EFD4), rd8(0x10D53BD8)))
+    sys.wait_ms(2000)
+end
+sys.exit(0)

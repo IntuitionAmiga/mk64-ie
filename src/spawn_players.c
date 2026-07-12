@@ -1174,12 +1174,23 @@ void func_8003CD98(Player* player, Camera* camera, s8 playerId, s8 screenId) {
             load_kart_texture(player, playerId, screenId, screenId, 0);
             mio0decode_noinval((u8*) /* & */gEncodedKartTexture[0][screenId][playerId].unk_00,
                        (u8*) &D_802BFB80.arraySize8[0][screenId][playerId]);
+#ifdef IE_GFX_SVC
+            /* One-shot decode: fill both parity copies of the kart
+             * arena so later frames read a valid texture whichever
+             * copy KART_TEXTURE_ARENA selects. */
+            mio0decode_noinval((u8*) gEncodedKartTexture[0][screenId][playerId].unk_00,
+                       (u8*) &D_802BFB80_svcAlt.arraySize8[0][screenId][playerId]);
+#endif
         } else {
             load_kart_palette(player, playerId, screenId, 0);
             load_kart_palette(player, playerId, screenId, 1);
             load_kart_texture(player, (s8) (playerId + 4), screenId, (s8) (screenId - 2), 0);
             mio0decode_noinval((u8*) gEncodedKartTexture[0][screenId - 2][playerId + 4].unk_00,
                        (u8*) &D_802BFB80.arraySize8[0][screenId - 2][playerId + 4]);
+#ifdef IE_GFX_SVC
+            mio0decode_noinval((u8*) gEncodedKartTexture[0][screenId - 2][playerId + 4].unk_00,
+                       (u8*) &D_802BFB80_svcAlt.arraySize8[0][screenId - 2][playerId + 4]);
+#endif
         }
 
         gLastAnimFrameSelector[screenId][playerId] = player->animFrameSelector[screenId];

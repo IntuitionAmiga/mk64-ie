@@ -1,0 +1,113 @@
+-- P0.2 first-stage driver: launch IE64 and M68K workers and drive the echo
+-- request entirely from IEScript, before relying on a guest-side caller.
+--
+-- Endianness: mem.read32/write32 are little-endian bus accesses. The M68K
+-- worker reads guest RAM (0x10000000+) big-endian, so every RAM word it
+-- consumes or produces is composed byte-wise here. Coprocessor MMIO registers
+-- (0xF2340) are native-numeric and use mem.read32/write32 directly.
+local C = 0x000F2340
+local CMD, CPU, CMD_STATUS = C + 0x00, C + 0x04, C + 0x08
+local TICKET, TICKET_STATUS = C + 0x10, C + 0x14
+local OP, REQ_PTR, REQ_LEN = C + 0x18, C + 0x1C, C + 0x20
+local RESP_PTR, RESP_CAP, NAME_PTR = C + 0x24, C + 0x28, C + 0x30
+local CMD_START, CMD_ENQUEUE, CMD_POLL = 1, 3, 4
+local CPU_M68K, CPU_IE64 = 4, 2
+local NAME = 0x10002000
+local REQ, STATUS = 0x10002100, 0x10002200
+local SOURCE, DEST = 0x10000000, 0x10001000
+
+-- Raw RAM access requires the freeze gate; cpu.freeze() is the lightweight
+-- counter (no monitor round-trip, unlike dbg.freeze which can deadlock
+-- against a busy-polling worker). MMIO does not need it.
+local function frozen(fn)
+    cpu.freeze()
+    local ok, result = pcall(fn)
+    cpu.resume()
+    if not ok then
+        sys.print("M68K ECHO IESCRIPT FAIL: " .. tostring(result))
+        sys.exit(1)
+    end
+    return result
+end
+
+local function read_be32(addr)
+    return frozen(function()
+        return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+             + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+    end)
+end
+
+local function write_be32(addr, value)
+    frozen(function()
+        mem.write8(addr, math.floor(value / 0x1000000) % 0x100)
+        mem.write8(addr + 1, math.floor(value / 0x10000) % 0x100)
+        mem.write8(addr + 2, math.floor(value / 0x100) % 0x100)
+        mem.write8(addr + 3, value % 0x100)
+    end)
+end
+
+local function write_cstr(addr, value)
+    frozen(function()
+        for i = 1, #value do mem.write8(addr + i - 1, string.byte(value, i)) end
+        mem.write8(addr + #value, 0)
+    end)
+end
+
+local function start(cpu, filename)
+    write_cstr(NAME, filename)
+    mem.write32(CPU, cpu)
+    mem.write32(NAME_PTR, NAME)
+    mem.write32(CMD, CMD_START)
+    if mem.read32(CMD_STATUS) ~= 0 then
+        sys.print("M68K ECHO IESCRIPT FAIL: COSTART failed for " .. filename)
+        sys.exit(1)
+    end
+end
+
+-- The script host's established coprocessor smoke starts IE64 and proves it
+-- online first. Wait for its status publication before adding M68K.
+local ready_deadline = sys.time_ms() + 20000
+while read_be32(0x0009F000) ~= 0x4D4B3634 and sys.time_ms() < ready_deadline do
+    sys.wait_ms(100)
+end
+if read_be32(0x0009F000) ~= 0x4D4B3634 then
+    sys.print("M68K ECHO IESCRIPT FAIL: IE64 host smoke did not finish")
+    sys.exit(1)
+end
+start(CPU_M68K, "build/ie/echo.ie68")
+-- Request struct and source word live in guest RAM: big-endian layout.
+write_be32(SOURCE, 0x12345678)
+write_be32(REQ + 0, SOURCE)
+write_be32(REQ + 4, DEST)
+write_be32(REQ + 8, 1)
+write_be32(REQ + 12, 1)
+mem.write32(CPU, CPU_M68K)
+mem.write32(OP, 0x4543484F)
+mem.write32(REQ_PTR, REQ)
+mem.write32(REQ_LEN, 16)
+mem.write32(RESP_PTR, STATUS)
+mem.write32(RESP_CAP, 16)
+mem.write32(CMD, CMD_ENQUEUE)
+local ticket = mem.read32(TICKET)
+local deadline = sys.time_ms() + 5000
+repeat
+    mem.write32(TICKET, ticket)
+    mem.write32(CMD, CMD_POLL)
+    if mem.read32(TICKET_STATUS) == 2 then break end
+    sys.wait_ms(100)
+until sys.time_ms() >= deadline
+
+if mem.read32(TICKET_STATUS) ~= 2 then
+    sys.print("M68K ECHO IESCRIPT FAIL: echo request timed out")
+    sys.exit(1)
+end
+if read_be32(DEST) ~= 0xB76E6ABB then
+    sys.print(string.format("M68K ECHO IESCRIPT FAIL: dest=%08x", read_be32(DEST)))
+    sys.exit(1)
+end
+if read_be32(STATUS + 12) ~= 0x0F then
+    sys.print(string.format("M68K ECHO IESCRIPT FAIL: flags=%08x", read_be32(STATUS + 12)))
+    sys.exit(1)
+end
+sys.print("M68K ECHO IESCRIPT PASS")
+sys.exit(0)

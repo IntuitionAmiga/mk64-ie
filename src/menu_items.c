@@ -1,10 +1,10 @@
-#include <kos.h>
-#include "kos_undef.h"
 
 #include <stdio.h>
 #include <ultra64.h>
+#include "platform/platform.h"
 #include <PR/ultratypes.h>
 #include <macros.h>
+#include <asset_endian.h>
 #include <defines.h>
 #include <segments.h>
 #include <sounds.h>
@@ -570,13 +570,13 @@ char* D_800E7938[] = {
 
 // In a perfect world this would be `char *D_800E7940[][4]`
 char* D_800E7940[] = {
-    "NO DREAMCAST VMU DETECTED",
+    "NO N64 CONTROLLER PAK DETECTED",
     "TO SAVE GHOST DATA, ",
-    "INSERT DREAMCAST VMU ",
+    "INSERT N64 CONTROLLER PAK ",
     "INTO CONTROLLER 1",
 
     "UNABLE TO READ ",
-    "DREAMCAST VMU DATA",
+    "N64 CONTROLLER PAK DATA",
     "",
     "",
 
@@ -586,16 +586,15 @@ char* D_800E7940[] = {
     "",
 
     "INSUFFICIENT FREE PAGES AVAILABLE ",
-    "ON DREAMCAST VMU TO CREATE ",
-    "GAME DATA, PLEASE FREE 67 BLOCKS",
-    "TO SAVE TIME TRIAL GHOSTS."
-//    "                                 ",
+    "IN N64 CONTROLLER PAK TO CREATE ",
+    "GAME DATA, PLEASE FREE 121 PAGES.",
+    "SEE INSTRUCTION BOOKLET FOR DETAILS.",
 };
 
 // Unused?
 char* D_800E7980[] = {
     "TO SAVE GHOST DATA, ",
-    "INSERT DREAMCAST VMU ",
+    "INSERT N64 CONTROLLER PAK ",
     "INTO CONTROLLER 1",
 };
 
@@ -3270,19 +3269,6 @@ Gfx* func_80098558(Gfx* displayListHead, u32 arg1, u32 arg2, u32 arg3, u32 arg4,
     }
     return displayListHead;
 }
-static inline void sincoss(u16 arg0, f32* s, f32* c) {
-    register float __s __asm__("fr2");
-    register float __c __asm__("fr3");
-
-    asm("lds    %2,fpul\n\t"
-        "fsca    fpul,dr2\n\t"
-        : "=f"(__s), "=f"(__c)
-        : "r"(arg0)
-        : "fpul");
-
-    *s = __s;
-    *c = __c;
-}
 Gfx* func_800987D0(Gfx* displayListHead, u32 arg1, u32 arg2, u32 width, u32 height, s32 column, s32 row,
                    UNUSED u8* arg7, u32 textureWidth, UNUSED s32 textureHeight) {
     s32 var_a2;
@@ -4126,7 +4112,7 @@ void convert_img_to_greyscale(s32 arg0, u32 arg1) {
     color = &gMenuTextureBuffer[sMenuTextureMap[arg0].offset];
     size = sMenuTextureMap[arg0 + 1].offset - sMenuTextureMap[arg0].offset;
     for (i = 0; i < (u32) size; i++) {
-		uint16_t c = __builtin_bswap16(*color);
+		uint16_t c = asset_be_u16(color);
         red = ((c & 0xF800) >> 11) * 0x55;
         green = ((c & 0x7C0) >> 6) * 0x4B;
 		blue = ((c & 0x3E) >> 1) * 0x5F;
@@ -4137,7 +4123,8 @@ void convert_img_to_greyscale(s32 arg0, u32 arg1) {
         if (temp_t9 >= 0x20) {
             temp_t9 = 0x1F;
         }
-        *color++ = (temp_t9 << 1) | (temp_t9 << 6) | (temp_t9 << 11) | alpha;
+        asset_be_store_u16(color, (temp_t9 << 1) | (temp_t9 << 6) | (temp_t9 << 11) | alpha);
+        color++;
     }
 }
 
@@ -4154,7 +4141,7 @@ void adjust_img_colour(s32 arg0, s32 arg1, u32 arg2, u32 arg3, u32 arg4) {
     u16* color;
     color = &gMenuTextureBuffer[sMenuTextureMap[arg0].offset];
     for (var_v1 = 0; var_v1 != arg1; var_v1++) {
-        uint16_t c = *color;
+        uint16_t c = asset_be_u16(color);
         red = ((c & 0xF800) >> 0xB) * 0x4D;
         green = ((c & 0x7C0) >> 6) * 0x96;
         blue = ((c & 0x3E) >> 1) * 0x1D;
@@ -4164,8 +4151,8 @@ void adjust_img_colour(s32 arg0, s32 arg1, u32 arg2, u32 arg3, u32 arg4) {
         newred = ((temp_t9 * arg2) >> 8) << 0xB;
         newgreen = ((temp_t9 * arg3) >> 8) << 6;
         newblue = ((temp_t9 * arg4) >> 8) << 1;
-        u16 c2 = newred + newgreen + newblue + alpha;
-        *color++ = (c2 << 8) | ((c2 >> 8) & 0xff);
+        asset_be_store_u16(color, newred + newgreen + newblue + alpha);
+        color++;
     }
 }
 
@@ -5404,9 +5391,7 @@ void add_menu_item(s32 type, s32 column, s32 row, s8 priority) {
         }
         i++;
         if (i > ARRAY_COUNT(gMenuItems)) {
-            printf("something bad in add menu item\n");
-            exit(-1);
-            //            while (1) {}
+            platform_fatal("something bad in add menu item");
         }
         menuItem++;
     }
@@ -5851,7 +5836,6 @@ void add_menu_item(s32 type, s32 column, s32 row, s8 priority) {
 
 extern int in_intro;
 extern void nuke_everything(void);
-#include <GL/gl.h>
 void render_menus(MenuItem* arg0) {
     s32 var_a1 = 0;
     s32 var_v1 = 0;
@@ -10178,13 +10162,7 @@ MenuItem* get_menu_item_player_count(void) {
         }
     }
 
-    printf("something bad in get_menu_item_player_count\n");
-    exit(-1);
-
-    // Something VERY wrong has occurred
-    while (1) {
-        ;
-    }
+    platform_fatal("something bad in get_menu_item_player_count");
 escape:
     return entry;
 }
@@ -10202,13 +10180,7 @@ MenuItem* get_menu_item_character(s32 characterId) {
             goto escape;
         }
     }
-    printf("something bad in get_menu_item_character\n");
-    exit(-1);
-
-    // Something VERY wrong has occurred
-    while (1) {
-        ;
-    }
+    platform_fatal("something bad in get_menu_item_character");
 escape:
     return entry;
 }
@@ -10230,13 +10202,7 @@ MenuItem* find_menu_items_dupe(s32 type) {
             goto escape;
         }
     }
-    printf("something bad in find_menu_items_dupe\n");
-    exit(-1);
-
-    // Something VERY wrong has occurred
-    while (1) {
-        ;
-    }
+    platform_fatal("something bad in find_menu_items_dupe");
 escape:
     return entry;
 }

@@ -1,0 +1,9 @@
+sys.wait_ms(15000)
+cpu.freeze()
+local b = {}
+for i = 0, 7 do b[#b+1] = string.format("%02x", mem.read8(0x10D44778 + i)) end
+sys.print("client g_pending..g_last: " .. table.concat(b, " "))
+sys.print(string.format("ring6 h=%d t=%d cap=%d", mem.read8(0x791200), mem.read8(0x791201), mem.read8(0x791202)))
+sys.print(string.format("PC=%08x", dbg.get_pc()))
+cpu.resume()
+sys.exit(0)

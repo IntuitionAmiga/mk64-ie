@@ -1,5 +1,3 @@
-#include <kos.h>
-#include "kos_undef.h"
 
 #include <ultra64.h>
 #include <macros.h>
@@ -19,6 +17,12 @@
 #include "code_800029B0.h"
 #include "cpu_vehicles_camera_path.h"
 #include "menu_items.h"
+
+#if defined(IE_AUDIO_SVC) && !defined(IE_AUDIO_SERVICE)
+/* Audio service main build: sequencer state reads resolve into the worker's
+ * RAM window (see the header for the redirect + fail-closed rules). */
+#include "ie_audio_svc_redirect.h"
+#endif
 
 #define PLAYER_SOUND_DEBUGGING 1
 
@@ -546,6 +550,12 @@ void func_800C2274(u8 player) {
                     var_a2 = 0xC;
                 }
                 break;
+        }
+        /* Channel pointers are rewritten during sequence loads; skip the
+         * read (it re-polls next frame) rather than deref a stale pointer.
+         * Locally this only adds the sentinel check the original omitted. */
+        if (!IS_SEQUENCE_CHANNEL_VALID(gSequencePlayers[player].channels[var_a2])) {
+            return;
         }
         temp_s0 = gSequencePlayers[player].channels[var_a2]->soundScriptIO[0];
         if (temp_s0 != why) {
@@ -1787,7 +1797,7 @@ void func_800C5968(u8 arg0) {
 void func_800C59C4(void) {
     u8 i = 0;
 
-    if (gSequencePlayers[2].channels[0] != &gSequenceChannelNone) {
+    if (IS_SEQUENCE_CHANNEL_VALID(gSequencePlayers[2].channels[0])) {
         D_80192C38 = 0;
         for (i = 0; i < 6; i++) {
             func_800C4888(i);

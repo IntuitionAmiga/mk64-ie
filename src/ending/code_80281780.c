@@ -1,6 +1,3 @@
-#include <kos.h>
-#include "kos_undef.h"
-
 #include <ultra64.h>
 #include <macros.h>
 #include <defines.h>
@@ -28,6 +25,7 @@
 #include "main.h"
 #include "menus.h"
 #include "render_courses.h"
+#include "platform/platform.h"
 
 u8 defaultCharacterIds[] = { 1, 2, 3, 4, 5, 6, 7, 0 };
 
@@ -92,17 +90,17 @@ void func_802818BC(void) {
     }
 }
 
-extern Gfx d_course_royal_raceway_packed_dl_67E8[];
-extern Gfx d_course_royal_raceway_packed_dl_AEF8[];
-extern Gfx d_course_royal_raceway_packed_dl_A970[];
-extern Gfx d_course_royal_raceway_packed_dl_AC30[];
-extern Gfx d_course_royal_raceway_packed_dl_CE0[];
-extern Gfx d_course_royal_raceway_packed_dl_E88[];
-extern Gfx d_course_royal_raceway_packed_dl_A618[];
-extern Gfx d_course_royal_raceway_packed_dl_A618[];
-extern Gfx d_course_royal_raceway_packed_dl_23F8[];
-extern Gfx d_course_royal_raceway_packed_dl_2478[];
 #include "buffer_sizes.h"
+
+/*
+ * Royal Raceway displaylists used for the ceremony collision mesh.
+ * These live in the unpacked segment-7 stream produced by
+ * displaylist_unpack at load_course time; the constants are the
+ * original segment-7 byte offsets (8-byte Gfx units), converted to
+ * native Gfx indexing so they stay correct when Gfx is wider.
+ */
+extern Gfx __attribute__((aligned(32))) UNPACKED_DL_BUF[UNPACKED_DL_BUF_SIZE / 8];
+#define ROYAL_RACEWAY_UNPACKED_DL(offset) (&UNPACKED_DL_BUF[(offset) / 8])
 extern uint8_t __attribute__((aligned(32))) CEREMONY_BUF[CEREMONY_BUF_SIZE];
 extern uint8_t __attribute__((aligned(32))) COURSE_BUF[COURSE_BUF_SIZE];
 extern u16 reflection_map_silver[1024];
@@ -110,53 +108,17 @@ extern u16 reflection_map_gold[1024];
 extern u16 reflection_map_brass[1024];
 extern CollisionTriangle __attribute__((aligned(32))) allColTris[allColTris_SIZE];
 
-extern char *fnpre;
-
-static char texfn[256];
-
 extern u16 gTexturePodium1[];
 extern u16 gTexturePodium2[];
 extern u16 gTexturePodium3[];
 
 void load_ceremony_data(void) {
-    sprintf(texfn, "%s/dc_data/ceremony_data.bin", fnpre);
-    FILE* file = fopen(texfn, "rb");
-    if (!file) {
-        perror("fopen");
-        printf("\n");
-        // while(1) {}
-        exit(-1);
+    if (!platform_asset_read("ceremony_data.bin", CEREMONY_BUF, sizeof(CEREMONY_BUF), NULL)) {
+        platform_fatal("failed to read asset ceremony_data.bin");
     }
-
-    fseek(file, 0, SEEK_END);
-    long filesize = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    long toread = filesize;
-    long didread = 0;
-
-    while (didread < filesize) {
-        long rv = fread(&CEREMONY_BUF[didread], 1, toread - didread, file);
-        if (rv == -1) {
-            perror("fread");
-            printf("couldnt read into ceremony buf\n");
-            // while(1) {}
-            exit(-1);
-        }
-        toread -= rv;
-        didread += rv;
-    }
-    fclose(file);
-    file = NULL;
     set_segment_base_addr(0xB, (void*) CEREMONY_BUF);
-    u16 *sPod1 = (u16 *)segmented_to_virtual(gTexturePodium1);
-    u16 *sPod2 = (u16 *)segmented_to_virtual(gTexturePodium2);
-    u16 *sPod3 = (u16 *)segmented_to_virtual(gTexturePodium3);
-    for (int i=0;i<32*32;i++) {
-        sPod1[i] = __builtin_bswap16(sPod1[i]);
-        sPod2[i] = __builtin_bswap16(sPod2[i]);
-        sPod3[i] = __builtin_bswap16(sPod3[i]);
-    }
+    /* Podium and reflection-map texels stay in stored (big-endian)
+     * form; the translator decodes them at import time. */
 }
 
 void load_ceremony_cutscene(void) {
@@ -183,36 +145,10 @@ void load_ceremony_cutscene(void) {
     gModeSelection = GRAND_PRIX;
     load_course(gCurrentCourseId);
     load_ceremony_data();
-    sprintf(texfn, "%s/dc_data/banshee_boardwalk_data.bin", fnpre);
 
-    FILE* file = fopen(texfn, "rb");
-    if (!file) {
-        perror("fopen");
-        printf("\n");
-        // while(1) {}
-        exit(-1);
+    if (!platform_asset_read("banshee_boardwalk_data.bin", COURSE_BUF, sizeof(COURSE_BUF), NULL)) {
+        platform_fatal("failed to read asset banshee_boardwalk_data.bin");
     }
-
-    fseek(file, 0, SEEK_END);
-    long filesize = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    long toread = filesize;
-    long didread = 0;
-
-    while (didread < filesize) {
-        long rv = fread(&COURSE_BUF[didread], 1, toread - didread, file);
-        if (rv == -1) {
-            perror("fread");
-            printf("couldnt read into course buf\n");
-            // while(1) {}
-            exit(-1);
-        }
-        toread -= rv;
-        didread += rv;
-    }
-    fclose(file);
-    file = NULL;
 
     set_segment_base_addr(6, (void*) COURSE_BUF);
 
@@ -233,27 +169,16 @@ void load_ceremony_cutscene(void) {
     D_800DC5BC = (u16) 0;
     D_800DC5C8 = (u16) 0;
     gCollisionMesh = (CollisionTriangle*) allColTris;
-    //! @bug these segmented addresses need to be symbols for mobility
-    // d_course_royal_raceway_packed_dl_67E8
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_67E8, -1);
-    // d_course_royal_raceway_packed_dl_AEF8
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_AEF8, -1);
-    // d_course_royal_raceway_packed_dl_A970
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_A970, 8);
-    // d_course_royal_raceway_packed_dl_AC30
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_AC30, 8);
-    // d_course_royal_raceway_packed_dl_CE0
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_CE0, 0x10);
-    // d_course_royal_raceway_packed_dl_E88
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_E88, 0x10);
-    // d_course_royal_raceway_packed_dl_A618
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_A618, -1);
-    // d_course_royal_raceway_packed_dl_A618
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_A618, -1);
-    // d_course_royal_raceway_packed_dl_23F8
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_23F8, 1);
-    // d_course_royal_raceway_packed_dl_2478
-    generate_collision_mesh_with_default_section_id((Gfx*) d_course_royal_raceway_packed_dl_2478, 1);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0x67E8), -1);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0xAEF8), -1);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0xA970), 8);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0xAC30), 8);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0xCE0), 0x10);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0xE88), 0x10);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0xA618), -1);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0xA618), -1);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0x23F8), 1);
+    generate_collision_mesh_with_default_section_id(ROYAL_RACEWAY_UNPACKED_DL(0x2478), 1);
     func_80295C6C();
     debug_switch_character_ceremony_cutscene();
     func_802818BC();
@@ -263,23 +188,4 @@ void load_ceremony_cutscene(void) {
     balloons_and_fireworks_init();
     init_camera_podium_ceremony();
     func_80093E60();
-    // gold
-    uint16_t* reflp = (uint16_t*) segmented_to_virtual(0x0B002F18);
-    for (int i = 0; i < 32 * 32; i++) {
-        uint16_t nextrp = reflp[i];
-        nextrp = (nextrp << 8) | ((nextrp >> 8) & 0xff);
-        reflp[i] = nextrp;
-    } // brass
-    reflp = (uint16_t*) segmented_to_virtual(0x0B003F18);
-    for (int i = 0; i < 32 * 32; i++) {
-        uint16_t nextrp = reflp[i];
-        nextrp = (nextrp << 8) | ((nextrp >> 8) & 0xff);
-        reflp[i] = nextrp;
-    } // silver
-    reflp = (uint16_t*) segmented_to_virtual(0x0B003718);
-    for (int i = 0; i < 32 * 32; i++) {
-        uint16_t nextrp = reflp[i];
-        nextrp = (nextrp << 8) | ((nextrp >> 8) & 0xff);
-        reflp[i] = nextrp;
-    }
 }

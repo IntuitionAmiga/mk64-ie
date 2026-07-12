@@ -1,0 +1,74 @@
+-- Confirm/deny packed-DL desync at race time. After the attract demo
+-- enters RACING, read the unpack seek positions the course loader left
+-- behind and screenshot the frame. A runaway unpack shows
+-- sPackedSeekPosition near/over UNPACK_BUF_SIZE (51008) and/or
+-- sGfxSeekPosition near UNPACKED_DL_BUF_SIZE/8 (6377).
+
+local STATUS_ADDR      = 0x0009F000
+local MAGIC            = 0x4D4B3634
+local GAMESTATE_ADDR   = 0x10619d20
+local CUR_COURSE_ADDR  = 0x1105f690
+local SGFX_SEEK_ADDR   = 0x11111c1c
+local SPACKED_SEEK_ADDR= 0x11111c20
+local UNPACK_BUF_SIZE     = 51008
+local UNPACKED_DL_ENTRIES = 6377
+local TARGET_SWAP      = 0
+local WARMUP_MS        = 480000
+local POLL_MS          = 200
+
+local function rd_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    dbg.open(); dbg.freeze()
+    local magic = rd_be32(STATUS_ADDR)
+    local swaps = rd_be32(STATUS_ADDR + 16)
+    local state = rd_be32(GAMESTATE_ADDR)
+    dbg.resume(); dbg.close()
+    return magic, swaps, state
+end
+
+local deadline = sys.time_ms() + WARMUP_MS
+local swaps, state = 0, -1
+local ticks = 0
+while sys.time_ms() < deadline do
+    local magic
+    magic, swaps, state = sample()
+    if magic == MAGIC and state == 4 and swaps >= TARGET_SWAP then break end
+    ticks = ticks + 1
+    if ticks % 20 == 0 then
+        sys.print(string.format("DLUNPACK warmup: magic=0x%08X swaps=%d state=%d", magic, swaps, state))
+    end
+    sys.wait_ms(POLL_MS)
+end
+
+if not (state == 4 and swaps >= TARGET_SWAP) then
+    sys.print(string.format("DIAG FAIL: no RACING swap %d (last swaps=%d state=%d)", TARGET_SWAP, swaps, state))
+    sys.exit(1)
+end
+
+sys.wait_ms(300)
+dbg.open(); dbg.freeze()
+local course   = rd_be32(CUR_COURSE_ADDR)
+local gfxseek  = rd_be32(SGFX_SEEK_ADDR)
+local pkseek   = rd_be32(SPACKED_SEEK_ADDR)
+dbg.resume(); dbg.close()
+
+local h = video.frame_hash()
+rec.screenshot("build/ie/diag_nojit.png")
+
+sys.print(string.format("DLUNPACK: course=%d sGfxSeek=%d/%d (%.1f%%) sPackedSeek=%d/%d (%.1f%%) swaps=%d frame_hash=0x%08X",
+    course,
+    gfxseek, UNPACKED_DL_ENTRIES, 100.0 * gfxseek / UNPACKED_DL_ENTRIES,
+    pkseek, UNPACK_BUF_SIZE, 100.0 * pkseek / UNPACK_BUF_SIZE,
+    swaps, h))
+if gfxseek >= UNPACKED_DL_ENTRIES - 4 then
+    sys.print("DLUNPACK: *** sGfxSeek at buffer cap -> RUNAWAY/OVERRUN confirmed ***")
+end
+if pkseek >= UNPACK_BUF_SIZE - 8 then
+    sys.print("DLUNPACK: *** sPackedSeek ran off UNPACK_BUF -> no 0xFF terminator ***")
+end
+sys.wait_ms(150)
+sys.exit(0)

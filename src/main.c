@@ -1,8 +1,6 @@
 #ifndef GCC
 #define D_800DC510_AS_U16
 #endif
-#include <kos.h>
-#include "kos_undef.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +15,7 @@
 #include "profiler.h"
 #include "main.h"
 #include "racing/memory.h"
+#include "racing/course_metadata.h"
 #include "menus.h"
 #include <segments.h>
 #include <common_structs.h>
@@ -43,13 +42,11 @@
 #include "staff_ghosts.h"
 #include <debug.h>
 #include "crash_screen.h"
+#include "platform/platform.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-char *fnpre;
-const void *__kos_romdisk;
 
 void func_80091B78(void);
 void audio_init(void);
@@ -190,27 +187,33 @@ f32 gCourseTimer = 0.0f;
 int inited = 0;
 
 #include "gfx/gfx_pc.h"
-#include "gfx/gfx_opengl.h"
-#include "gfx/gfx_dc.h"
 
 int ever_loaded_save_yet = 0;
 
-extern struct GfxWindowManagerAPI gfx_glx;
-extern struct GfxRenderingAPI gfx_opengl_api;
-static struct GfxWindowManagerAPI *wm_api = &gfx_dc;
-static struct GfxRenderingAPI *rendering_api = &gfx_opengl_api;
-
-extern void gfx_run(Gfx *commands);
+/*
+ * Backend selection is a platform decision. No graphics or window backend
+ * exists in this branch; a real backend is registered in a later stage.
+ * gfx_init fails explicitly while these are NULL.
+ */
+static struct GfxWindowManagerAPI *wm_api = NULL;
+static struct GfxRenderingAPI *rendering_api = NULL;
 
 extern void thread5_game_loop(void *arg);
 
-#include "dcaudio/audio_api.h"
-#include "dcaudio/audio_dc.h"
-extern void create_next_audio_buffer(s16* samples, u32 num_samples);
+#include "audio/audio_api.h"
+#include "ie_audio_sample_table.h"
+extern void game_audio_pump_voices(void);
+extern void ie_audio_voice_note_reset_drained(void);
 
-#include "buffer_sizes.h"
-extern s16 audio_buffer[AUDIOBUF_SIZE] __attribute__((aligned(64)));
 static struct AudioAPI *audio_api = NULL;
+
+void platform_install_apis(struct GfxWindowManagerAPI* wm,
+                           struct GfxRenderingAPI* rendering,
+                           struct AudioAPI* audio) {
+    wm_api = wm;
+    rendering_api = rendering;
+    audio_api = audio;
+}
 
 static int frameno = 0;
 static int even_frame;
@@ -247,16 +250,6 @@ static void send_display_list(struct SPTask *spTask) {
 
 uint16_t __attribute__((aligned(32))) fb[3][4];
 
-void create_thread(UNUSED OSThread* thread, UNUSED OSId id, void (*entry)(void*), void* arg, void* sp, OSPri pri) {
-    kthread_attr_t main_attr;
-    main_attr.create_detached = 1;
-	main_attr.stack_size = 32768;
-	main_attr.stack_ptr = sp;
-	main_attr.prio = pri;
-	main_attr.label = "thread";
-    thd_create_ex(&main_attr, entry, arg);
-}
-
 // mio0encode
 s32 func_80040174(UNUSED void*, UNUSED s32, UNUSED s32) {
 	return -1;
@@ -268,252 +261,85 @@ s32 mio0encode(UNUSED s32, UNUSED s32, UNUSED s32) {
 
 u8 *_audio_banksSegmentRomStart;
 u8 *_audio_tablesSegmentRomStart;
+u8 *_audio_tablesPcm16SegmentRomStart;
 u8 *_instrument_setsSegmentRomStart;
 u8 *_sequencesSegmentRomStart;
 
 //extern void init_all_sounds(void);
 void _AudioInit(void);
 
-__used void __stack_chk_fail(void) {
-    unsigned int pr = (unsigned int)arch_get_ret_addr();
-    printf("Stack smashed at PR=0x%08x\n", pr);
-    printf("Successfully detected stack corruption!\n");
-    exit(EXIT_SUCCESS);
+#define AUDIOBANKS_SIZE 79936
+#define AUDIOTABLES_SIZE 2409664
+#define INSTRUMENT_SETS_SIZE 256
+#define SEQUENCES_SIZE 143728
+
+static u8* load_audio_segment(const char* name, size_t size) {
+    u8* buf = malloc(size);
+
+    if (buf == NULL) {
+        platform_fatal("out of memory loading %s (%zu bytes)", name, size);
+    }
+    if (!platform_asset_read(name, buf, size, NULL)) {
+        platform_fatal("failed to read audio asset %s", name);
+    }
+    return buf;
 }
-#if 0
-/* Callback function used to handle a breakpoint request. */
-static bool on_break(const ubc_breakpoint_t *bp,
-                     const irq_context_t *ctx,
-                     void *ud) {
-    /* Don't warn about unused bp */
-    (void)bp;
 
-
-    /* Print the location of the program counter when the breakpoint
-       IRQ was signaled (minus 2 if we're breaking AFTER instruction
-       execution!) */
-    printf("\tBREAKPOINT HIT! [PC = %x]\n", (unsigned)CONTEXT_PC(*ctx) - 2);
-
-    /* Userdata pointer used to hold a boolean used as the return value, which
-       dictates whether a breakpoint persists or is removed after being
-       handled. */
-    return (bool)ud;
-}
-    #endif
+void game_audio_pump(void);
 
 void setup_audio_data(void) {
-    char texfn[256];
-    u8 *AUDIOBANKS_BUF = memalign(32,79936);
-    if (!AUDIOBANKS_BUF) printf("can't malloc banks\n");
-    u8 *AUDIOTABLES_BUF = memalign(32,2409664);
-    if (!AUDIOTABLES_BUF) printf("can't malloc tables\n");
-    u8 *INSTRUMENT_SETS_BUF = memalign(32,256);
-    if (!INSTRUMENT_SETS_BUF) printf("can't malloc instruments\n");
-    u8 *SEQUENCES_BUF = memalign(32,143728);
-    if (!SEQUENCES_BUF) printf("can't malloc sequences\n");
-    vid_border_color(64, 64, 64);
-    // load sound data
-    {
-        sprintf(texfn, "%s/dc_data/audiobanks.bin", fnpre);
-        FILE* file = fopen(texfn, "rb");
-        if (!file) {
-            perror("fopen");
-            printf("\n");
-            while(1){}
-            exit(-1);
-        }
-
-        fseek(file, 0, SEEK_END);
-        long filesize = ftell(file);
-        //printf("audiobanks is %ld @ %08x\n", filesize, (uintptr_t)AUDIOBANKS_BUF);
-        rewind(file);
-
-        long toread = filesize;
-        long didread = 0;
-
-        while (didread < filesize) {
-            long rv = fread(&AUDIOBANKS_BUF[didread], 1, toread - didread, file);
-
-            if (rv == -1) {
-                printf("FILE IS FUCKED\n");
-                printf("\n");
-                while(1){}
-                exit(-1);
-            }
-            //printf("writing %08x size %ld\n", (uintptr_t)&AUDIOBANKS_BUF[didread], rv);
-
-            toread -= rv;
-            didread += rv;
-        }
-
-        fclose(file);
-        _audio_banksSegmentRomStart = AUDIOBANKS_BUF;
-    }
-
-    vid_border_color(128, 128, 128);
-    {
-        sprintf(texfn, "%s/dc_data/audiotables.bin", fnpre);
-        FILE* file = fopen(texfn, "rb");
-        if (!file) {
-            perror("fopen");
-            printf("\n");
-            while(1){}
-            exit(-1);
-        }
-
-        fseek(file, 0, SEEK_END);
-        long filesize = ftell(file);
-        //printf("audiotables is %ld @ %08x\n", filesize, (uintptr_t)AUDIOTABLES_BUF);
-        rewind(file);
-
-        long toread = filesize;
-        long didread = 0;
-
-        while (didread < filesize) {
-            long rv = fread(&AUDIOTABLES_BUF[didread], 1, toread - didread, file);
-            if (rv == -1) {
-                printf("FILE IS FUCKED\n");
-                printf("\n");
-                while(1){}
-                exit(-1);
-            }
-            //printf("writing %08x size %ld\n", (uintptr_t)&AUDIOTABLES_BUF[didread], rv);
-            toread -= rv;
-            didread += rv;
-        }
-
-        fclose(file);
-        _audio_tablesSegmentRomStart = AUDIOTABLES_BUF;
-    }
-
-    vid_border_color(192, 192, 192);
-    {
-        sprintf(texfn, "%s/dc_data/instrument_sets.bin", fnpre);
-        FILE* file = fopen(texfn, "rb");
-        if (!file) {
-            perror("fopen");
-            printf("\n");
-            while(1){}
-            exit(-1);
-        }
-
-        fseek(file, 0, SEEK_END);
-        long filesize = ftell(file);
-        //printf("instrument_sets is %ld @ %08x\n", filesize, (uintptr_t)INSTRUMENT_SETS_BUF);
-        rewind(file);
-
-        long toread = filesize;
-        long didread = 0;
-
-        while (didread < filesize) {
-            long rv = fread(&INSTRUMENT_SETS_BUF[didread], 1, toread - didread, file);
-            if (rv == -1) {
-                printf("FILE IS FUCKED\n");
-                printf("\n");
-                while(1){}
-                exit(-1);
-            }
-            //printf("writing %08x size %ld\n", (uintptr_t)&INSTRUMENT_SETS_BUF[didread], rv);
-            toread -= rv;
-            didread += rv;
-        }
-
-        fclose(file);
-        _instrument_setsSegmentRomStart = INSTRUMENT_SETS_BUF;
-    }
-    vid_border_color(255, 255, 255);
-    {
-        sprintf(texfn, "%s/dc_data/sequences.bin", fnpre);
-        FILE* file = fopen(texfn, "rb");
-        if (!file) {
-            perror("fopen");
-            printf("\n");
-            while(1){}
-            exit(-1);
-        }
-
-        fseek(file, 0, SEEK_END);
-        long filesize = ftell(file);
-        //printf("sequences is %ld @ %08x\n", filesize, (uintptr_t)SEQUENCES_BUF);
-        rewind(file);
-
-        long toread = filesize;
-        long didread = 0;
-
-        while (didread < filesize) {
-            long rv = fread(&SEQUENCES_BUF[didread], 1, toread - didread, file);
-            if (rv == -1) {
-                printf("FILE IS FUCKED\n");
-                printf("\n");
-                while(1){}
-                exit(-1);
-            }
-
-            //printf("writing %08x size %ld\n", (uintptr_t)&SEQUENCES_BUF[didread], rv);
-
-            toread -= rv;
-            didread += rv;
-        }
-
-        fclose(file);
-        _sequencesSegmentRomStart = SEQUENCES_BUF;
-    }
+    _audio_banksSegmentRomStart = load_audio_segment("audiobanks.bin", AUDIOBANKS_SIZE);
+    _audio_tablesSegmentRomStart = load_audio_segment("audiotables.bin", AUDIOTABLES_SIZE);
+    _audio_tablesPcm16SegmentRomStart = load_audio_segment("audiotables.pcm16.bin", IE_AUDIO_PCM16_SIZE);
+    _instrument_setsSegmentRomStart = load_audio_segment("instrument_sets.bin", INSTRUMENT_SETS_SIZE);
+    _sequencesSegmentRomStart = load_audio_segment("sequences.bin", SEQUENCES_SIZE);
 
     _AudioInit();
+
+#ifdef IE_AUDIO_SVC
+    /*
+     * Audio service: worker B owns audio_init and the boot reset drain
+     * (it publishes ready only after both). The main CPU keeps only the
+     * producer half, so sound_init still runs here. On any service
+     * failure fall through to the local path unchanged.
+     */
+    {
+        extern int ie_audio_svc_init(void);
+
+        if (ie_audio_svc_init()) {
+            sound_init();
+            return;
+        }
+    }
+#endif
+
     audio_init();
     sound_init();
-    vid_border_color(0, 0, 0);
-}
 
-#include "dcprofiler.h"
+    /*
+     * audio_init arms the audio reset state machine
+     * (gAudioResetStatus); on the console the audio thread ran the
+     * reset to completion before the game loaded any sequence. Here
+     * the pump is driven from the game loop, so drain the reset now -
+     * otherwise the first pumps run the shutdown steps after the SFX
+     * sequence is enabled and silence it permanently.
+     */
+    {
+        extern volatile u8 gAudioResetStatus;
+
+        while (gAudioResetStatus != 0) {
+            game_audio_pump();
+        }
+        ie_audio_voice_note_reset_drained();
+    }
+}
 
 s32 osAppNmiBuffer[16];
 void isPrintfInit(void);
 extern int must_inval_bg;
 extern int stupid_fucking_faces_hack;
 
-const uint32_t rainbow[] = {
-    0xF800F800, // Red     (255,   0,   0)
-    0xFD20FD20, // Orange  (255, 165,   0)
-    0xFFE0FFE0, // Yellow  (255, 255,   0)
-    0x07E007E0, // Green   (  0, 255,   0)
-    0x001F001F, // Blue    (  0,   0, 255)
-    0x72157215, // Indigo  ( 90,  30, 180)
-    0x801F801F  // Violet  (148,   0, 211)
-};
-
-void rainbow_print(int x, int y, char *text) {
-    int ci = 0;
-    void *ptr = (void*)((uintptr_t)vram_s + ((y*640*2) + (x*2)));
-    for (size_t i=0;i<strlen(text);i++) {
-        if (ci == 18) ci = 0;
-        bfont_draw_ex(ptr, 640, rainbow[ci%7], 0x00000000, 16, 1, text[i], 0, 0);
-        if (text[i] != ' ') ci++;
-        ptr = (void*)((uintptr_t)ptr + (12*2));
-    }
-    ptr = (void*)((uintptr_t)vram_s + (((y+1)*640*2) + ((x+1)*2)));
-    ci = 0;
-    for (size_t i=0;i<strlen(text);i++) {
-        if (ci == 18) ci = 0;
-        bfont_draw_ex(ptr, 640, rainbow[ci%7], 0x00000000, 16, 0, text[i], 0, 0);
-        if (text[i] != ' ') ci++;
-        ptr = (void*)((uintptr_t)ptr + (12*2));
-    }
-    ptr = (void*)((uintptr_t)vram_s + (((y-1)*640*2) + ((x-1)*2)));
-    ci = 0;
-    for (size_t i=0;i<strlen(text);i++) {
-        if (ci == 18) ci = 0;
-        bfont_draw_ex(ptr, 640, rainbow[ci%7], 0x00000000, 16, 0, text[i], 0, 0);
-        if (text[i] != ' ') ci++;
-        ptr = (void*)((uintptr_t)ptr + (12*2));
-    }
-
-}
-
-
 int main(UNUSED int argc, UNUSED char **argv) {
-    thd_set_hz(300);
-
     must_inval_bg = 0;
     stupid_fucking_faces_hack = 0;
 
@@ -523,37 +349,8 @@ int main(UNUSED int argc, UNUSED char **argv) {
     gPhysicalFramebuffers[1] = fb[1];
     gPhysicalFramebuffers[2] = fb[2];
 
-    dbgio_enable();
-    dbglog_set_level(0);
-
-    thd_sleep(375);
-
-    FILE* fntest = fopen("/pc/dc_data/common_data.bin", "rb");
-    if (NULL == fntest) {
-        fntest = fopen("/cd/dc_data/common_data.bin", "rb");
-        if (NULL == fntest) {
-            printf("Cant load from /pc or /cd");
-            printf("\n");
-            while(1){}
-           exit(-1);
-        } else {
-            fnpre = "/cd";
-        }
-    } else {
-        fnpre = "/pc";
-    }
-
-    fclose(fntest);
-    thd_sleep(375);
-    dbgio_disable();
     setup_audio_data();
 
-    //profiler_init("/pc/audiogmon.out");
-    //profiler_start();
-
-    rainbow_print(180+18, 260-24, "Welcome to Mario Kart :)");
-
-    thd_sleep(1500);
     thread5_game_loop(NULL);
 
     return 0;
@@ -620,14 +417,14 @@ int held;
 int sd_x,sd_y;
 
 void init_controllers(void) {
+    struct PlatformControllerState state;
+
     gControllerBits = 0;
 
-    maple_device_t *cont;
-    for (int i=0;i<4;i++) {
-        cont = NULL;
-        cont = maple_enum_type(i, MAPLE_FUNC_CONTROLLER);
-        if (cont)
+    for (int i = 0; i < 4; i++) {
+        if (platform_poll_controller(i, &state) && state.connected) {
             gControllerBits |= (1 << i);
+        }
     }
     if ((gControllerBits & 1) == 0) {
         sIsController1Unplugged = 1;
@@ -639,157 +436,23 @@ void init_controllers(void) {
     sd_x = sd_y = held = 0;
 }
 
-#if 1
-//extern int player_index;
-
-#define N64_CONT_A 0x8000
-#define N64_CONT_B 0x4000
-#define N64_CONT_G 0x2000
-#define N64_CONT_START 0x1000
-#define N64_CONT_UP 0x0800
-#define N64_CONT_DOWN 0x0400
-#define N64_CONT_LEFT 0x0200
-#define N64_CONT_RIGHT 0x0100
-#define N64_CONT_L 0x0020
-#define N64_CONT_R 0x0010
-#define N64_CONT_E 0x0008
-#define N64_CONT_D 0x0004
-#define N64_CONT_C 0x0002
-#define N64_CONT_F 0x0001
-
-/* Nintendo's official button names */
-#undef A_BUTTON 
-#undef B_BUTTON
-#undef L_TRIG
-#undef R_TRIG
-#undef Z_TRIG
-#undef START_BUTTON
-#undef U_JPAD
-#undef L_JPAD
-#undef R_JPAD
-#undef D_JPAD
-#undef U_CBUTTONS
-#undef L_CBUTTONS
-#undef R_CBUTTONS
-#undef D_CBUTTONS
-
-#define A_BUTTON N64_CONT_A
-#define B_BUTTON N64_CONT_B
-#define L_TRIG N64_CONT_L
-#define R_TRIG N64_CONT_R
-#define Z_TRIG N64_CONT_G
-#define START_BUTTON N64_CONT_START
-#define U_JPAD N64_CONT_UP
-#define L_JPAD N64_CONT_LEFT
-#define R_JPAD N64_CONT_RIGHT
-#define D_JPAD N64_CONT_DOWN
-#define U_CBUTTONS N64_CONT_E
-#define L_CBUTTONS N64_CONT_C
-#define R_CBUTTONS N64_CONT_F
-#define D_CBUTTONS N64_CONT_D
-#endif
-
-#undef CONT_C
-#undef CONT_B
-#undef CONT_A
-#undef CONT_START
-#undef CONT_DPAD_UP
-#undef CONT_DPAD_DOWN
-#undef CONT_DPAD_LEFT
-#undef CONT_DPAD_RIGHT
-#undef CONT_Z
-#undef CONT_Y
-#undef CONT_X
-#undef CONT_D
-#undef CONT_DPAD2_UP
-#undef CONT_DPAD2_DOWN
-#undef CONT_DPAD2_LEFT
-#undef CONT_DPAD2_RIGHT
-
-
-#define CONT_C              (1<<0)      /**< \brief C button Mask. */
-#define CONT_B              (1<<1)      /**< \brief B button Mask. */
-#define CONT_A              (1<<2)      /**< \brief A button Mask. */
-#define CONT_START          (1<<3)      /**< \brief Start button Mask. */
-#define CONT_DPAD_UP        (1<<4)      /**< \brief Main Dpad Up button Mask. */
-#define CONT_DPAD_DOWN      (1<<5)      /**< \brief Main Dpad Down button Mask. */
-#define CONT_DPAD_LEFT      (1<<6)      /**< \brief Main Dpad Left button Mask. */
-#define CONT_DPAD_RIGHT     (1<<7)      /**< \brief Main Dpad right button Mask. */
-#define CONT_Z              (1<<8)      /**< \brief Z button Mask. */
-#define CONT_Y              (1<<9)      /**< \brief Y button Mask. */
-#define CONT_X              (1<<10)     /**< \brief X button Mask. */
-#define CONT_D              (1<<11)     /**< \brief D button Mask. */
-#define CONT_DPAD2_UP       (1<<12)     /**< \brief Secondary Dpad Up button Mask. */
-#define CONT_DPAD2_DOWN     (1<<13)     /**< \brief Secondary Dpad Down button Mask. */
-#define CONT_DPAD2_LEFT     (1<<14)     /**< \brief Secondary Dpad Left button Mask. */
-#define CONT_DPAD2_RIGHT    (1<<15)     /**< \brief Secondary Dpad Right button Mask. */
 extern void __osPfsCloseAllFiles(void);
 u16 ucheld;
 u16 stick;
 void update_controller(s32 index) {
-	struct Controller* controller = &gControllers[index];
-    maple_device_t *cont;
-    cont_state_t *state;
+    struct Controller* controller = &gControllers[index];
+    struct PlatformControllerState state;
     ucheld = 0;
     stick = 0;
     if (index > 3)
         return;
-    cont = maple_enum_type(index, MAPLE_FUNC_CONTROLLER);
-    if (!cont)
+    if (!platform_poll_controller(index, &state) || !state.connected)
         return;
-    state = maple_dev_status(cont);
 
-    if (strcmp("/pc", fnpre) == 0) {
-        if ((state->buttons & CONT_START) && state->ltrig && state->rtrig) {
-            //profiler_stop();
-            //profiler_clean_up();
-            // give vmu a chance to write and close
-            __osPfsCloseAllFiles();   
-            exit(0);
-        }
-    }
-
-    const char stickH =state->joyx;
-    const char stickV = 0xff-((uint8_t)(state->joyy));
-    controller->rawStickX = ((float)stickH/127)*80;
-    controller->rawStickY = ((float)stickV/127)*80;
-
-    if (state->buttons & CONT_A)
-        ucheld |= 0x8000; //A_BUTTON
-#if defined(BUTTON_SWAP_X)
-    if (state->buttons & CONT_X)
-        ucheld |= 0x0001; //C_RIGHT
-    if (state->buttons & CONT_B)
-        ucheld |= 0x4000; //B_BUTTON
-#else
-    if (state->buttons & CONT_X)
-        ucheld |= 0x4000; //B_BUTTON
-    if (state->buttons & CONT_B)
-        ucheld |= 0x0001; //C_RIGHT
-#endif
-
-    if (state->ltrig) {
-        if (gGamestate > 3) // DC L is N64 Z in-game
-            ucheld |= 0x2000; //Z_TRIG
-        else // DC L becomes N64 L in-menu
-            ucheld |= 0x0020; //L_TRIG
-    }
-    if (state->buttons & CONT_START)
-       ucheld |= 0x1000; //START_BUTTON
-
-    if (state->buttons & CONT_DPAD_UP)
-        ucheld |= 0x0800; //U_JPAD
-    if (state->buttons & CONT_DPAD_DOWN)
-        ucheld |= 0x0400; //D_JPAD
-    if (state->buttons & CONT_DPAD_LEFT)
-        ucheld |= 0x0200; //L_JPAD
-    if (state->buttons & CONT_DPAD_RIGHT)
-        ucheld |= 0x0100; //R_JPAD
-
-    if (state->rtrig)
-        ucheld |= 0x0010; //R_TRIG
-    if (state->buttons & CONT_Y)
-        ucheld |= 0x0008; //C_UP
+    /* The backend reports N64-layout buttons and N64-range stick values. */
+    controller->rawStickX = state.stick_x;
+    controller->rawStickY = state.stick_y;
+    ucheld = state.buttons;
 
     controller->buttonPressed = ucheld & (ucheld ^ controller->button);
     controller->buttonDepressed = controller->button & (ucheld ^ controller->button);
@@ -1015,540 +678,34 @@ extern u16 common_tlut_lakitu_reverse[];
 extern u16 common_tlut_lakitu_final_lap[];
 extern u16 common_tlut_lakitu_fishing[];
 extern u16 l_common_texture_minimap_kart_mario[][64];
-int sgm_run = 0;
 extern void load_ceremony_data(void);
 
 /**
  * Setup main segments and framebuffers.
  */
-static char texfn[256];
-
 void setup_game_memory(void) {
-    set_segment_base_addr(0, 0x8C010000);
+    /* Segment 0 is an identity mapping: low segmented addresses are
+     * already real (the old port pointed this at its RAM base). */
+    set_segment_base_addr(0, NULL);
     func_80000BEC();
+
+    /* Per-course values for load_course, from the neutral asset layout. */
+    course_metadata_load();
 
     memset(COMMON_BUF, 0, sizeof(COMMON_BUF));
     set_segment_base_addr(2, SEG_DATA_START);
 
-    sprintf(texfn, "%s/dc_data/common_data.bin", fnpre);
-
-    FILE* file = NULL;
-    file = fopen(texfn, "rb");
-    if (!file) {
-        perror("fopen");
-        exit(-1);
+    if (!platform_asset_read("common_data.bin", COMMON_BUF, sizeof(COMMON_BUF), NULL)) {
+        platform_fatal("failed to read asset common_data.bin");
     }
-
-    fseek(file, 0, SEEK_END);
-    long filesize = ftell(file);
-    //printf("common data is %ld\n", filesize);
-    rewind(file);
-
-    long toread = filesize;
-    long didread = 0;
-
-    while (didread < filesize) {
-        long rv = fread(&COMMON_BUF[didread], 1, toread - didread, file);
-        if (rv == -1) {
-            printf("FILE IS FUCKED\n");
-            exit(-1);
-        }
-        toread -= rv;
-        didread += rv;
-    }
-
-    fclose(file);
-    file = NULL;
 
     set_segment_base_addr(0xD, (void*) COMMON_BUF);
-    // Common course data does not get reloaded when the race state resets.
-    if (!sgm_run) {
-    extern u16 l_d_course_rainbow_road_static_tluts[][256];
-
-    u16* tlut_ptr = (u16*) segmented_to_virtual(l_d_course_rainbow_road_static_tluts[0]);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(l_d_course_rainbow_road_static_tluts[1]);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-        tlut_ptr = (u16*) segmented_to_virtual(l_d_course_rainbow_road_static_tluts[2]);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-        tlut_ptr = (u16*) segmented_to_virtual(l_d_course_rainbow_road_static_tluts[3]);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-        tlut_ptr = (u16*) segmented_to_virtual(l_d_course_rainbow_road_static_tluts[4]);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-        tlut_ptr = (u16*) segmented_to_virtual(l_d_course_rainbow_road_static_tluts[5]);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-        tlut_ptr = (u16*) segmented_to_virtual(l_d_course_rainbow_road_static_tluts[6]);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        // a whole bunch of stuff I have to endian-swap
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_player_emblem);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_particle_leaf);
-        for (int i = 0; i < 32*16; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_bomb);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_lakitu_countdown);
-        for (int i = 0; i < 768; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_lakitu_checkered_flag);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_lakitu_final_lap);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_lakitu_fishing);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_lakitu_reverse);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_lakitu_second_lap);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_lap_time);
-        for (int i = 0; i < 32 * 16; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_total_time);
-        for (int i = 0; i < 32 * 16; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_time);
-        for (int i = 0; i < 512; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_normal_digit);
-        for (int i = 0; i < 1664; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_123);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_lap);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_lap_1_on_3);
-        for (int i = 0; i < 512; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_lap_2_on_3);
-        for (int i = 0; i < 512; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_hud_lap_3_on_3);
-        for (int i = 0; i < 512; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        // 32*64
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_item_box_question_mark);
-        for (int i = 0; i < 32 * 64; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_finish_line_banner);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_trees_import);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_green_shell);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_blue_shell);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_mario);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_bomb_kart_and_question_mark);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_luigi);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_wario);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_yoshi);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_peach);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_toad);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_bowser);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_portrait_donkey_kong);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_none);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_banana);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_banana_bunch);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_mushroom);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_double_mushroom);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_triple_mushroom);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_super_mushroom);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_blue_shell);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_boo);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_green_shell);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_triple_green_shell);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_red_shell);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_triple_red_shell);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_star);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_thunder_bolt);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_tlut_item_window_fake_item_box);
-        for (int i = 0; i < 256; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_banana);
-        for (int i = 0; i < 32 * 32; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = (u16*) segmented_to_virtual(common_texture_flat_banana);
-        for (int i = 0; i < 64 * 32; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[0]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[1]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[2]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[3]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(common_texture_minimap_finish_line);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[4]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[5]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[6]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[7]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        tlut_ptr = segmented_to_virtual(l_common_texture_minimap_kart_mario[8]);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-
-        tlut_ptr = segmented_to_virtual(common_texture_minimap_progress_dot);
-        for (int i = 0; i < 8 * 8; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        // bomb kart wheel, 16x16
-        tlut_ptr = segmented_to_virtual(D_0D02AA58);
-        for (int i = 0; i < 16 * 16; i++) {
-            uint16_t np = tlut_ptr[i];
-            np = (np << 8) | ((np >> 8) & 0xff);
-            tlut_ptr[i] = np;
-        }
-
-        sgm_run = 1;
-    }
+    /*
+     * The previous port byte-swapped a long list of common-data TLUTs and
+     * texels here for its little-endian backend. The neutral translator
+     * reads palettes and texels in their stored (big-endian) form, so the
+     * data is used as-is now.
+     */
     load_ceremony_data();
 }
 
@@ -2155,17 +1312,6 @@ void update_gamestate(void) {
     }
 }
 
-void SPINNING_THREAD(UNUSED void *arg);
-
-static volatile uint64_t vblticker=0;
-
-void vblfunc(uint32_t c, void *d) {
-	(void)c;
-	(void)d;
-    vblticker++;
-    genwait_wake_one((void *)&vblticker);
-}    
-
 void thread5_game_loop(UNUSED void* arg) {
     setup_mesg_queues();
     setup_game_memory();
@@ -2193,62 +1339,39 @@ void thread5_game_loop(UNUSED void* arg) {
     rendering_init();
     read_controllers();
     func_800C5CB8();
-	inited = 1;
-    vblank_handler_add(&vblfunc, NULL);
-    create_thread(NULL, 5, &SPINNING_THREAD, NULL, NULL, 12);
-#define MEMTEST
-#if defined(MEMTEST)
-    for(int mi=0;mi<6*1048576;mi+=65536) {
-        void *test_m = malloc(mi);
-        if (test_m != NULL) {
-            free(test_m);
-            test_m = NULL;
-            continue;
-        } else {
-            int bi = mi - 65536;
-            for (; bi < 6 * 1048576; bi++) {
-                test_m = malloc(bi);
-                if (test_m != NULL) {
-                    free(test_m);
-                    test_m = NULL;
-                    continue;
-                } else {
-                    printf("free ram for malloc: %d\n", bi);
-                    goto run_game_loop;
-                }
-            }
-        }
-    }
-run_game_loop:
-#endif
+    inited = 1;
 
     while (true) {
         game_loop_one_iteration();
-		thd_pass();
     }
 }
 
 void _AudioInit(void) {
+    /*
+     * No audio backend exists in this branch. A real backend registers
+     * itself here in a later stage; until then this must fail loudly
+     * rather than pretend audio is available.
+     */
     if (audio_api == NULL) {
-        audio_api = &audio_dc;
-        audio_api->init();
+        platform_fatal("no audio backend registered");
     }
+    audio_api->init();
 }
 
-void SPINNING_THREAD(UNUSED void *arg) {
-    uint64_t last_vbltick = vblticker;
+/*
+ * Audio pump: the platform backend must call this once per vblank (see the
+ * scheduling contract in platform/platform.h). The previous console port
+ * ran this on a helper thread woken from the vblank interrupt.
+ */
+void game_audio_pump(void) {
+#ifdef IE_AUDIO_SVC
+    extern int ie_audio_svc_active(void);
+    extern void ie_audio_svc_pump(void);
 
-    while (1) {
-//        {
-//            irq_disable_scoped();
-            while (vblticker <= last_vbltick)
-                genwait_wait((void*)&vblticker, NULL, 15, NULL);
-//        }
-
-        last_vbltick = vblticker;
-
-        create_next_audio_buffer(audio_buffer, SAMPLES_HIGH);
-
-        audio_api->play((u8 *)audio_buffer, (SAMPLES_HIGH * 2 * 2));
+    if (ie_audio_svc_active()) {
+        ie_audio_svc_pump();
+        return;
     }
+#endif
+    game_audio_pump_voices();
 }

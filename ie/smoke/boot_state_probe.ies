@@ -1,0 +1,36 @@
+local STATUS_ADDR = 0x0009F000
+local ADDR = {
+    gGamestate = 0x1061a770,
+    gGamestateNext = 0x1061a774,
+    gMenuSelection = 0x1061bd58,
+    gMainMenuSelection = 0x11109ef1,
+    gPlayerSelectMenuSelection = 0x11109ef2,
+    gActiveScreenMode = 0x111089de,
+    gScreenModeSelection = 0x111089e2,
+}
+
+local function rd8(addr)
+    return mem.read8(addr)
+end
+
+local function rd_be32(addr)
+    return rd8(addr) * 0x1000000 + rd8(addr + 1) * 0x10000
+        + rd8(addr + 2) * 0x100 + rd8(addr + 3)
+end
+
+sys.wait_ms(5000)
+dbg.open()
+dbg.freeze()
+local dim_w, dim_h = video.get_dimensions()
+local report = string.format(
+    "BOOT_STATE magic=0x%08X swaps=%d state=%d next=%d menu=%d main=%d player=%d active=%d selected=%d dim=%dx%d frame=0x%08X\n",
+    rd_be32(STATUS_ADDR), rd_be32(STATUS_ADDR + 16), rd_be32(ADDR.gGamestate),
+    rd_be32(ADDR.gGamestateNext), rd_be32(ADDR.gMenuSelection),
+    rd8(ADDR.gMainMenuSelection), rd8(ADDR.gPlayerSelectMenuSelection),
+    rd_be32(ADDR.gActiveScreenMode), rd_be32(ADDR.gScreenModeSelection),
+    dim_w, dim_h, video.frame_hash())
+dbg.resume()
+dbg.close()
+sys.print(report)
+sys.write_file("build/ie/boot_state_probe.txt", report)
+sys.exit(0)

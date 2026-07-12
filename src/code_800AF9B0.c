@@ -75,10 +75,7 @@ void func_800AF9E4(Vtx* arg0, s32 arg1, s32 arg2, s32 arg3, s16 arg4, s16 arg5, 
     }
 
     gDPSetPrimColor(gDisplayListHead++, 0, 0, r, g, b, 255);
-    // force the flag to use prim color only
-    // loses lighting but at least we see the checkers
-    gDPSetCombineMode(gDisplayListHead++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
-    gDPPipeSync(gDisplayListHead++);
+
     gSPVertex(gDisplayListHead++, VIRTUAL_TO_PHYSICAL2(arg0), 4, 0);
     gSP1Triangle(gDisplayListHead++, 1, 2, 0, 0);
     gSP1Triangle(gDisplayListHead++, 3, 2, 1, 0);
@@ -178,9 +175,16 @@ void func_800B0004(void) {
     gSPLight(gDisplayListHead++, VIRTUAL_TO_PHYSICAL2(&D_800E8688), LIGHT_1);
     gSPLight(gDisplayListHead++, VIRTUAL_TO_PHYSICAL2(&D_800E8680), LIGHT_2);
     gSPNumLights(gDisplayListHead++, NUMLIGHTS_1);
+    /* The flag draws over the 2D title backdrop: stale G_ZBUFFER
+     * state from earlier 3D items would depth-test it against menu
+     * pixels and cull it entirely (the console never wrote depth for
+     * those, so it passed there). */
+    gSPClearGeometryMode(gDisplayListHead++, G_ZBUFFER);
     gSPSetGeometryMode(gDisplayListHead++, G_SHADE | G_SHADING_SMOOTH);
-    // revisit this when color combiner fakery is better
-    //gDPSetCombineLERP(gDisplayListHead++, PRIMITIVE, 0, SHADE, 0, 0, 0, 0, SHADE, PRIMITIVE, 0, SHADE, 0, 0, 0, 0, SHADE);
+    /* Original combiner: PRIMITIVE*SHADE - the backend evaluates the
+     * combiner formula per vertex now, so the previous port's
+     * "fakery" fallback below is gone. */
+    gDPSetCombineLERP(gDisplayListHead++, PRIMITIVE, 0, SHADE, 0, 0, 0, 0, SHADE, PRIMITIVE, 0, SHADE, 0, 0, 0, 0, SHADE);
     gSPClearGeometryMode(gDisplayListHead++, G_CULL_BACK);
     gSPSetGeometryMode(gDisplayListHead++, G_LIGHTING);
     vtxs = (D_8018EDB4 % 2) ? (D_8018EDB8) : (D_8018EDBC);

@@ -3,7 +3,21 @@
 
 #include <ultra64.h>
 
+/*
+ * Byte order of the compilation target. Audio source data (banks,
+ * wave tables, sequences, envelopes) is big-endian ROM data, so code
+ * reading multi-byte fields out of it must either use the explicit
+ * accessors in include/asset_endian.h or key off this macro.
+ */
+#if defined(TARGET_N64) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#define IS_BIG_ENDIAN 1
+#else
+#define IS_BIG_ENDIAN 0
+#endif
+
+#ifdef TARGET_N64
 #define ssize_t s32
+#endif
 
 #define SEQUENCE_PLAYERS 4
 #define SEQUENCE_CHANNELS 48
@@ -608,19 +622,34 @@ struct EuAudioCmd {
 **/
 
 struct EuAudioCmd {
+    /* u.first is written as a packed word (op in the top byte); the
+     * byte-wise view must follow the target byte order. */
     union {
+#if IS_BIG_ENDIAN
+        struct {
+            u8 op;
+            u8 bankId;
+            u8 arg2;
+            u8 arg3;
+        } s;
+#else
         struct {
             u8 arg3;
             u8 arg2;
             u8 bankId;
             u8 op;
         } s;
+#endif
         u32 first;
     } u;
     union {
         s32 as_s32;
         u32 as_u32;
         f32 as_f32;
+#if IS_BIG_ENDIAN
+        u8 as_u8;
+        s8 as_s8;
+#else
         struct {
             u8 pad0[3];
             u8 as_u8;
@@ -629,6 +658,7 @@ struct EuAudioCmd {
             u8 pad1[3];
             s8 as_s8;
         };
+#endif
     } u2;
 };
 

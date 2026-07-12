@@ -1,0 +1,20 @@
+local function frozen(fn)
+    cpu.freeze()
+    local ok, v = pcall(fn)
+    cpu.resume()
+    if not ok then sys.print("ERR "..tostring(v)) sys.exit(1) end
+    return v
+end
+local function rd32(addr)
+    return frozen(function()
+        return mem.read8(addr)*0x1000000 + mem.read8(addr+1)*0x10000 + mem.read8(addr+2)*0x100 + mem.read8(addr+3)
+    end)
+end
+local deadline = sys.time_ms() + 40000
+while rd32(0x9EFC0) ~= 0x41535643 and sys.time_ms() < deadline do sys.wait_ms(500) end
+for i = 1, 12 do
+    sys.print(string.format("t=%d gfx_frames=%d gfx_phase=%d audio_pumps=%d audio_usec=%d load=%d",
+        i, rd32(0x9EF90), rd32(0x9EF84), rd32(0x9EFD0), rd32(0x9EFD4), rd32(0x9EFCC)))
+    sys.wait_ms(1000)
+end
+sys.exit(0)

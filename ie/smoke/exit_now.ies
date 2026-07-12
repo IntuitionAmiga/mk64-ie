@@ -1,0 +1,3 @@
+sys.write_file("build/ie/exit_now.txt", "EXIT_NOW\n")
+sys.print("EXIT_NOW")
+sys.exit(0)

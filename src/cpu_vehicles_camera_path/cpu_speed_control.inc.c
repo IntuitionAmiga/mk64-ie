@@ -11,13 +11,13 @@ void func_80007D04(s32 playerId, Player* player) {
         s16 val2 = temp_t2 - temp_t1;
 
         if (val2 > 400 && val1 >= 6) {
-            player->effects &= ~UNKNOWN_EFFECT_0x200000;
+            player->effects &= ~CPU_FAST_EFFECT;
             player_accelerate(player);
             D_801634C0[playerId] = 4;
             return;
         }
     } else {
-        player->effects |= UNKNOWN_EFFECT_0x200000;
+        player->effects |= CPU_FAST_EFFECT;
         player_accelerate(player);
         D_801634C0[playerId] = 3;
         return;
@@ -63,19 +63,19 @@ void func_80007D04(s32 playerId, Player* player) {
     }
 
     if (temp_t2 < temp_t1) {
-        player->effects |= UNKNOWN_EFFECT_0x200000;
+        player->effects |= CPU_FAST_EFFECT;
         player_accelerate(player);
         D_801634C0[playerId] = 1;
     } else if (temp_t2 < (temp_t1 + var_v0 + 0x32)) {
-        player->effects &= ~UNKNOWN_EFFECT_0x200000;
+        player->effects &= ~CPU_FAST_EFFECT;
         player_accelerate(player);
         D_801634C0[playerId] = 3;
     } else if (D_801631E0[playerId] == 0) {
-        player->effects &= ~UNKNOWN_EFFECT_0x200000;
+        player->effects &= ~CPU_FAST_EFFECT;
         player_accelerate(player);
         D_801634C0[playerId] = 2;
     } else {
-        player->effects &= ~UNKNOWN_EFFECT_0x200000;
+        player->effects &= ~CPU_FAST_EFFECT;
         decelerate_player(player, 1.0f);
         D_801634C0[playerId] = -1;
     }
@@ -93,35 +93,33 @@ void func_80007FA4(s32 playerId, Player* player, f32 arg2) {
     if (playerId == 3) {
         if ((dist < 25.0f) && (D_80163410[playerId] < 5)) {
             D_80163410[playerId] = 4;
-            (arg2 < 0.16666667f/* ((2.0 * 18.0) / 216.0) */) ? func_80038BE4(player, 1) : decelerate_player(player, 1.0f);
+            (arg2 < ((2.0 * 18.0) / 216.0)) ? func_80038BE4(player, 1) : decelerate_player(player, 1.0f);
         } else if ((dist < 3600.0f) && (D_80163410[playerId] < 4)) {
             D_80163410[playerId] = 3;
-            (arg2 < 0.41666667f/* ((5.0 * 18.0) / 216.0) */) ? func_80038BE4(player, 1) : decelerate_player(player, 5.0f);
+            (arg2 < ((5.0 * 18.0) / 216.0)) ? func_80038BE4(player, 1) : decelerate_player(player, 5.0f);
         } else {
-            (arg2 < 1.66666667f/* ((20.0 * 18.0) / 216.0) */) ? func_80038BE4(player, 10) : decelerate_player(player, 1.0f);
+            (arg2 < ((20.0 * 18.0) / 216.0)) ? func_80038BE4(player, 10) : decelerate_player(player, 1.0f);
         }
     } else {
         if ((dist < 25.0f) && (D_80163410[playerId] < 5)) {
             D_80163410[playerId] = 4;
             test = 2;
-            (arg2 < test * 0.08333333f) /* ((test * 18.0) / 216.0)) */ ? func_80038BE4(player, 1) : decelerate_player(player, 1.0f);
+            (arg2 < ((test * 18.0) / 216.0)) ? func_80038BE4(player, 1) : decelerate_player(player, 1.0f);
         } else if ((dist < 4900.0f) && (D_80163410[playerId] < 4)) {
             D_80163410[playerId] = 3;
             test = 5;
-            (arg2 < test * 0.08333333f) /* ((test * 18.0) / 216.0)) */ ? func_80038BE4(player, 1) : decelerate_player(player, 15.0f);
+            (arg2 < ((test * 18.0) / 216.0)) ? func_80038BE4(player, 1) : decelerate_player(player, 15.0f);
         } else if ((dist < 22500.0f) && (D_80163410[playerId] < 3)) {
             D_80163410[playerId] = 2;
             test = 20;
-            (arg2 < test * 0.08333333f) /* ((test * 18.0) / 216.0)) */ ? func_80038BE4(player, 5) : decelerate_player(player, 1.0f);
+            (arg2 < ((test * 18.0) / 216.0)) ? func_80038BE4(player, 5) : decelerate_player(player, 1.0f);
         } else if ((dist < 90000.0f) && (D_80163410[playerId] < 2)) {
             D_80163410[playerId] = 1;
             test = 30;
-            (arg2 < test * 0.08333333f) /* ((test * 18.0) / 216.0)) */ ? func_80038BE4(player, 6) : decelerate_player(player, 1.0f);
+            (arg2 < ((test * 18.0) / 216.0)) ? func_80038BE4(player, 6) : decelerate_player(player, 1.0f);
         } else if (D_80163410[playerId] == 0) {
             test = 35;
-            /* (arg2 < (((test ^ 0) * 18.0) / 216.0)) */
-            (arg2 < test * 0.08333333f) /* ((test * 18.0) / 216.0)) */
-            ? func_80038BE4(player, 2) : decelerate_player(player, 1.0f);
+            (arg2 < (((test ^ 0) * 18.0) / 216.0)) ? func_80038BE4(player, 2) : decelerate_player(player, 1.0f);
         } else {
             decelerate_player(player, 1.0f);
         }
@@ -142,7 +140,7 @@ void regulate_cpu_speed(s32 playerId, f32 targetSpeed, Player* player) {
             func_80007FA4(playerId, player, speed);
         } else if ((bStopAICrossing[playerId] == 1) && !(player->effects & (STAR_EFFECT | BOO_EFFECT))) {
             decelerate_player(player, 10.0f);
-            if (player->currentSpeed == 0.0f) {
+            if (player->currentSpeed == 0.0) {
                 player->velocity[0] = 0.0f;
                 player->velocity[2] = 0.0f;
             }
@@ -160,39 +158,38 @@ void regulate_cpu_speed(s32 playerId, f32 targetSpeed, Player* player) {
                     break;
             }
             if (speed < var_f0) {
-                player->effects &= ~UNKNOWN_EFFECT_0x200000;
+                player->effects &= ~CPU_FAST_EFFECT;
                 player_accelerate(player);
             } else if (player->type & PLAYER_CINEMATIC_MODE) {
                 if (speed < targetSpeed) {
-                    player->effects &= ~UNKNOWN_EFFECT_0x200000;
+                    player->effects &= ~CPU_FAST_EFFECT;
                     player_accelerate(player);
                 } else {
-                    player->effects &= ~UNKNOWN_EFFECT_0x200000;
+                    player->effects &= ~CPU_FAST_EFFECT;
                     decelerate_player(player, 1.0f);
                 }
             } else if ((D_801631E0[playerId] == 1) && (D_80163330[playerId] != 1)) {
                 if (func_800088D8(playerId, gLapCountByPlayerId[playerId], gGPCurrentRaceRankByPlayerIdDup[playerId]) ==
                     1) {
-                    player->effects |= UNKNOWN_EFFECT_0x200000;
+                    player->effects |= CPU_FAST_EFFECT;
                     player_accelerate(player);
                 } else {
-                    player->effects &= ~UNKNOWN_EFFECT_0x200000;
+                    player->effects &= ~CPU_FAST_EFFECT;
                     decelerate_player(player, 1.0f);
                 }
             } else {
                 var_a1 = 1;
                 switch (gSpeedCPUBehaviour[playerId]) { /* switch 1; irregular */
                     case SPEED_cpu_BEHAVIOUR_FAST:      /* switch 1 */
-                        player->effects &= ~UNKNOWN_EFFECT_0x200000;
+                        player->effects &= ~CPU_FAST_EFFECT;
                         player_accelerate(player);
                         break;
                     case SPEED_cpu_BEHAVIOUR_MAX: /* switch 1 */
-                        player->effects |= UNKNOWN_EFFECT_0x200000;
+                        player->effects |= CPU_FAST_EFFECT;
                         player_accelerate(player);
                         break;
                     case SPEED_cpu_BEHAVIOUR_SLOW: /* switch 1 */
-//                        if (/* ((speed / 18.0f) * 216.0f) */(speed * 12.0f) > 20.0f) {
-                        if (speed > 1.6666666f) {
+                        if (((speed / 18.0f) * 216.0f) > 20.0f) {
                             targetSpeed = 1.6666666f;
                         }
                         var_a1 = 0;
@@ -210,14 +207,14 @@ void regulate_cpu_speed(s32 playerId, f32 targetSpeed, Player* player) {
                             func_80007D04(playerId, player);
                         } else if (func_800088D8(playerId, gLapCountByPlayerId[playerId],
                                                  gGPCurrentRaceRankByPlayerIdDup[playerId]) == 1) {
-                            player->effects |= UNKNOWN_EFFECT_0x200000;
+                            player->effects |= CPU_FAST_EFFECT;
                             player_accelerate(player);
                         } else {
-                            player->effects &= ~UNKNOWN_EFFECT_0x200000;
+                            player->effects &= ~CPU_FAST_EFFECT;
                             decelerate_player(player, 1.0f);
                         }
                     } else {
-                        player->effects &= ~UNKNOWN_EFFECT_0x200000;
+                        player->effects &= ~CPU_FAST_EFFECT;
                         if (targetSpeed > 1.0f) {
                             decelerate_player(player, 2.0f);
                         } else {

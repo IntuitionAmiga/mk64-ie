@@ -1,0 +1,5 @@
+sys.wait_ms(20000)
+cpu.freeze()
+sys.print(string.format("MAIN PC=%08x", dbg.get_pc()))
+cpu.resume()
+sys.exit(0)

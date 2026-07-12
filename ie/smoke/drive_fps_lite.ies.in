@@ -1,0 +1,96 @@
+-- Poll-free manual-driving FPS measurement.
+--
+-- drive_profile.ies freezes the CPU once per second to read counters;
+-- windowed runs pay a heavy pipeline stall per freeze, so its fps
+-- figure is depressed and run-to-run unstable (see race_fps_lite.ies.in
+-- for the same effect on the attract race). This variant freezes only
+-- to gate on the race, then brackets one untouched 30s driving span
+-- with exactly two samples.
+--
+-- Run:
+--   env IE_NO_IPC=1 IE_M68K_JIT_DISPATCH_HASH=0 \
+--     ../IntuitionEngine/bin/IntuitionEngine -file-root . \
+--     build/ie/mariokart64.ie68 -script build/ie/drive_fps_lite.ies
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634 -- 'MK64'
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@ -- s32 gGamestate; RACING == 4
+
+local RACE_WAIT_TIMEOUT_MS = 600000
+local SETTLE_SWAPS = 400
+local SETTLE_TIMEOUT_MS = 180000
+local SPAN_MS = 30000
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    local out = {}
+    dbg.open()
+    dbg.freeze()
+    out.status_magic = read_be32(STATUS_ADDR)
+    out.swaps = read_be32(STATUS_ADDR + 16)
+    out.state = read_be32(GAMESTATE_ADDR)
+    dbg.resume()
+    dbg.close()
+    return out
+end
+
+sys.print("DRIVE FPS LITE: waiting for a manual race - pick a course and DRIVE")
+local deadline = sys.time_ms() + RACE_WAIT_TIMEOUT_MS
+local s = nil
+while sys.time_ms() < deadline do
+    s = sample()
+    if s.status_magic == STATUS_MAGIC and s.state == 4 then
+        break
+    end
+    sys.wait_ms(2000)
+end
+if s == nil or s.status_magic ~= STATUS_MAGIC or s.state ~= 4 then
+    sys.print("DRIVE FPS LITE FAIL: no race reached before timeout")
+    sys.exit(1)
+end
+
+local settle_target = s.swaps + SETTLE_SWAPS
+sys.print(string.format(
+    "DRIVE FPS LITE: race detected at swap %d, settling until swap %d...",
+    s.swaps, settle_target))
+deadline = sys.time_ms() + SETTLE_TIMEOUT_MS
+while sys.time_ms() < deadline do
+    sys.wait_ms(2000)
+    s = sample()
+    if s.state ~= 4 then
+        sys.print("DRIVE FPS LITE FAIL: left the race during settle")
+        sys.exit(1)
+    end
+    if s.swaps >= settle_target then
+        break
+    end
+end
+if s.swaps < settle_target then
+    sys.print("DRIVE FPS LITE FAIL: settle timeout")
+    sys.exit(1)
+end
+
+sys.print(string.format(
+    "DRIVE FPS LITE: measuring untouched %ds span - KEEP DRIVING", SPAN_MS / 1000))
+local t0 = sys.time_ms()
+local first = s
+sys.wait_ms(SPAN_MS)
+s = sample()
+local elapsed_s = (sys.time_ms() - t0) / 1000.0
+
+if s.status_magic ~= STATUS_MAGIC then
+    sys.print("DRIVE FPS LITE FAIL: status block lost")
+    sys.exit(1)
+end
+if s.state ~= 4 then
+    sys.print("DRIVE FPS LITE WARNING: race ended during span - figure includes menu time")
+end
+
+local fps = (s.swaps - first.swaps) / elapsed_s
+sys.print(string.format("DRIVE FPS LITE: %.2f fps (swaps %d -> %d in %.1f s, 2 samples)",
+    fps, first.swaps, s.swaps, elapsed_s))
+sys.exit(0)

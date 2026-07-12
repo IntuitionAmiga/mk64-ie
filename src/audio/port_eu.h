@@ -23,7 +23,13 @@ extern OSMesgQueue D_801937D8;
 extern OSMesgQueue D_801937F0;
 extern OSMesgQueue D_80193808;
 
+#ifdef IE_AUDIO_SERVICE
+/* Worker pass: the ring is the main image's array, bound at OP_AUDIO_INIT. */
+extern struct EuAudioCmd *sAudioCmd;
+void ie_audio_svc_bind_cmds(void *ring);
+#else
 extern struct EuAudioCmd sAudioCmd[0x100];
+#endif
 
 extern OSMesg D_80194020[];
 extern OSMesg D_80194028[];

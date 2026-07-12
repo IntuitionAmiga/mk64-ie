@@ -1,0 +1,105 @@
+-- Freeze-free profile of the COURSE-INTRO PAN (the first stretch of
+-- gGamestate==RACING, before the countdown), which runs far below the
+-- race proper. Same two-read cumulative-counter method as
+-- svc_timing_probe (a debugger freeze costs ~0.7s of guest progress, so
+-- exactly TWO freezes bracket the span - NOT a per-frame freeze loop,
+-- which is what makes intro_pc_sample useless here).
+--
+-- Reads gfx worker self-timed counters:
+--   slot 4 frames, slot 6 cum translation+submit usec (worker BUSY time),
+--   slot 7 cum frame usec incl swap wait (worker WALL time per frame).
+-- Discriminator: during the pan, if slot7 >> slot6 the worker A is
+-- IDLE-WAITING -> the bottleneck is upstream (main: game logic / audio
+-- pump). If slot7 ~= slot6 and both are large -> worker A is BUSY on a
+-- giant pan display list (gfx-bound). Audio pump usec localizes the audio
+-- share of the main-side cost.
+--
+-- Run: make ie-svc-pan-probe IE_GFX_SVC=1 IE_AUDIO_SVC=1
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634 -- 'MK64'
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@ -- s32 gGamestate; RACING == 4
+local GFX_TRACE = 0x0009EF80
+local AUDIO_FB = 0x0009EFC0
+
+local RACE_WAIT_TIMEOUT_MS = 480000
+local PAN_MIN_SWAP = 530    -- pan onset is ~swap 535; catch it early
+local PAN_MAX_SWAP = 552    -- but not once the race proper has spun up
+local SPAN_MS = 3000        -- short: the pan lasts only a few wall seconds
+local WARMUP_POLL_MS = 200  -- tight so we bracket from near the onset
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function probe()
+    local out = {}
+    dbg.open()
+    dbg.freeze()
+    out.magic = read_be32(STATUS_ADDR)
+    out.swaps = read_be32(STATUS_ADDR + 16)
+    out.state = read_be32(GAMESTATE_ADDR)
+    out.gfx_frames = read_be32(GFX_TRACE + 16)
+    out.gfx_cum_xlat = read_be32(GFX_TRACE + 24)
+    out.gfx_cum_frame = read_be32(GFX_TRACE + 28)
+    out.gfx_max_xlat = read_be32(GFX_TRACE + 32)
+    out.aud_pumps = read_be32(AUDIO_FB + 0x10)
+    out.aud_cum = read_be32(AUDIO_FB + 0x1C)
+    dbg.resume()
+    dbg.close()
+    return out
+end
+
+sys.print("SVC PAN: waiting for the course-intro pan (first RACING swaps)")
+local deadline = sys.time_ms() + RACE_WAIT_TIMEOUT_MS
+local a = nil
+while sys.time_ms() < deadline do
+    a = probe()
+    if a.magic == STATUS_MAGIC and a.state == 4
+        and a.swaps >= PAN_MIN_SWAP and a.swaps <= PAN_MAX_SWAP then
+        break
+    end
+    if a.magic == STATUS_MAGIC and a.state == 4 and a.swaps > PAN_MAX_SWAP then
+        sys.print(string.format(
+            "SVC PAN FAIL: missed the pan window (swap %d > %d) - lower poll or raise max",
+            a.swaps, PAN_MAX_SWAP))
+        sys.exit(1)
+    end
+    sys.wait_ms(WARMUP_POLL_MS)
+end
+if a == nil or a.magic ~= STATUS_MAGIC or a.state ~= 4
+    or a.swaps < PAN_MIN_SWAP then
+    sys.print("SVC PAN FAIL: pan onset never reached")
+    sys.exit(1)
+end
+
+sys.print(string.format("SVC PAN: bracketing from swap %d", a.swaps))
+local t0 = sys.time_ms()
+sys.wait_ms(SPAN_MS)
+local b = probe()
+local elapsed_s = (sys.time_ms() - t0) / 1000.0
+
+local frames = b.gfx_frames - a.gfx_frames
+local pumps = b.aud_pumps - a.aud_pumps
+sys.print(string.format(
+    "SVC PAN PASS: %.1f s span, swaps %d -> %d (%.2f fps), state %d, gfx frames %d, audio pumps %d",
+    elapsed_s, a.swaps, b.swaps, (b.swaps - a.swaps) / elapsed_s, b.state, frames, pumps))
+if frames > 0 then
+    local xlat = (b.gfx_cum_xlat - a.gfx_cum_xlat) / frames
+    local whole = (b.gfx_cum_frame - a.gfx_cum_frame) / frames
+    sys.print(string.format(
+        "gfx worker: translation+submit %.0f us/frame, frame incl swap wait %.0f us/frame, idle-wait %.0f us/frame",
+        xlat, whole, whole - xlat))
+    if whole > xlat * 1.5 then
+        sys.print("SVC PAN VERDICT: worker A IDLE-WAITING -> bottleneck is MAIN-side (game logic / audio)")
+    else
+        sys.print("SVC PAN VERDICT: worker A BUSY -> bottleneck is GFX translation (giant pan DL)")
+    end
+else
+    sys.print("SVC PAN: zero gfx frames in span (worker starved or pan slower than span)")
+end
+if pumps > 0 then
+    sys.print(string.format("audio worker: avg pump %.0f us over %d pumps", (b.aud_cum - a.aud_cum) / pumps, pumps))
+end
+sys.exit(0)

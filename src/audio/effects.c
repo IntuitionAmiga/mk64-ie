@@ -26,14 +26,6 @@ void sequence_channel_process_sound(struct SequenceChannel* seqChannel, s32 reca
     for (i = 0; i < 4; ++i) {
         struct SequenceChannelLayer* layer = seqChannel->layers[i];
         if (layer != NULL && layer->enabled && layer->note != NULL) {
-            if ((uintptr_t)layer->note < (uintptr_t)0x8c010000) {
-                printf("effects.c INVALID NOTE %08x\n", (uintptr_t)layer->note);
-          //  printf("\n");
-            //while(1){}
-                exit(-1);
-            //}
-//continue;
-            }
             if (layer->notePropertiesNeedInit) {
                 layer->noteFreqScale = layer->freqScale * seqChannel->freqScale;
             //    printf("need init: %f * %f == %f\n", layer->freqScale, seqChannel->freqScale, layer->noteFreqScale);

@@ -1,0 +1,75 @@
+-- FPS measurement over a fixed title-attract span.
+--
+-- Measures wall time between two fixed swap counts (the window
+-- backend's status-block counter at +16). Swaps map 1:1 to game
+-- frames via display_and_vsync, so a fixed swap span is the same
+-- scene content on every build regardless of speed -- fps numbers
+-- from different builds are directly comparable.
+--
+-- Span 350..470 sits inside the title attract loop (baseline run
+-- measured swaps 372..431 there). Baseline: 1.97 fps (2026-07-03,
+-- commit f4aaf74c).
+--
+-- Run: make ie-fps
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local SPAN_START = 350
+local SPAN_END = 470
+local WARMUP_TIMEOUT_MS = 480000
+local POLL_MS = 250
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local swaps = read_be32(STATUS_ADDR + 16)
+    dbg.resume()
+    dbg.close()
+    return magic, swaps
+end
+
+-- Warm up: run until the scene reaches the start of the span.
+local deadline = sys.time_ms() + WARMUP_TIMEOUT_MS
+local start_ms = nil
+local swaps = 0
+while sys.time_ms() < deadline do
+    local magic
+    magic, swaps = sample()
+    if magic == MAGIC and swaps >= SPAN_START then
+        start_ms = sys.time_ms()
+        break
+    end
+    sys.wait_ms(POLL_MS)
+end
+
+if start_ms == nil then
+    sys.print(string.format("FPS FAIL: swap %d never reached %d before timeout", swaps, SPAN_START))
+    sys.exit(1)
+end
+local span_start = swaps -- may overshoot SPAN_START by a poll interval
+
+-- Measure: wall time until the end of the span.
+while true do
+    local magic
+    magic, swaps = sample()
+    if magic ~= MAGIC then
+        sys.print("FPS FAIL: status block lost during measurement")
+        sys.exit(1)
+    end
+    if swaps >= SPAN_END then
+        break
+    end
+    sys.wait_ms(POLL_MS)
+end
+
+local elapsed_s = (sys.time_ms() - start_ms) / 1000.0
+local fps = (swaps - span_start) / elapsed_s
+sys.print(string.format("FPS: %.2f (swaps %d -> %d in %.1f s)",
+    fps, span_start, swaps, elapsed_s))
+sys.exit(0)

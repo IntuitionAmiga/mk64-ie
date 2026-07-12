@@ -44,6 +44,10 @@ static int32_t SRL(int32_t val, int amount)
 // a0[in]: pointer to TKMK00 data
 // a1[out]: pointer to output (1 byte per pixel)
 // a2[out]: pointer to output (RGBA16, 2 bytes per pixel)
+#ifdef IE_GFX_SVC
+extern void ie_gfx_svc_drain_for_write(void);
+#endif
+
 // a3[in]: RGBA color to set alpha to 0, values observed: 0x01, 0xBE
 void tkmk00decode(uint32_t *_tkmk, uint8_t *tmp_buf, uint16_t *_rgba16, uint32_t alpha_color)  // 800405D0/0411D0
 {
@@ -67,6 +71,11 @@ void tkmk00decode(uint32_t *_tkmk, uint8_t *tmp_buf, uint16_t *_rgba16, uint32_t
    header6 = tkmk[0x6];
    pixels = width * height;
 
+#ifdef IE_GFX_SVC
+   /* The decode overwrites pixels a still-in-flight service frame may
+    * reference; wait for the worker before touching them. */
+   ie_gfx_svc_drain_for_write();
+#endif
    memset(rgba_buf, 0, sizeof(rgba_buf));
    memset(rgba16, 0, 2 * pixels);
    memset(tmp_buf, 0, pixels);

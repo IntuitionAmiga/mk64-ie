@@ -1,0 +1,53 @@
+-- Stage 3 save/ghost smoke, first boot: fresh storage, in-boot
+-- round-trips. Run via make ie-save-smoke (which clears the scratch
+-- file-root and then boots the image twice).
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local WANT_PHASE = 1
+local WANT_CHECKS = 0x1F
+local TIMEOUT_MS = 15000
+local SAMPLE_MS = 50
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local phase = read_be32(STATUS_ADDR + 16)
+    local checks = read_be32(STATUS_ADDR + 20)
+    dbg.resume()
+    dbg.close()
+    return magic, phase, checks
+end
+
+local deadline = sys.time_ms() + TIMEOUT_MS
+local magic, phase, checks = 0, 0, 0
+while sys.time_ms() < deadline do
+    magic, phase, checks = sample()
+    if magic == MAGIC then
+        break
+    end
+    sys.wait_ms(SAMPLE_MS)
+end
+
+sys.wait_ms(300)
+
+if magic ~= MAGIC then
+    sys.print(string.format("SMOKE FAIL: no boot magic (read 0x%08X)", magic))
+    sys.exit(1)
+end
+if phase ~= WANT_PHASE or checks ~= WANT_CHECKS then
+    sys.print(string.format("SMOKE FAIL: phase %d checks 0x%02X, want phase %d checks 0x%02X",
+                            phase, checks, WANT_PHASE, WANT_CHECKS))
+    sys.exit(1)
+end
+
+sys.print("SMOKE PASS: fresh save/ghost storage round-trips in-boot")
+sys.exit(0)

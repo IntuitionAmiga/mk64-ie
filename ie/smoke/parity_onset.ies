@@ -1,0 +1,49 @@
+-- Divergence-onset sweep for the swap-hash parity oracle: waits until
+-- the guest passes swap 610, then queries the per-swap hash ring for
+-- every swap in [560, 610] (well inside the 64-deep ring) and prints
+-- one line each. Diff two runs to find the exact first diverging swap.
+-- Requires IE_SWAP_HASH=1.
+local FIRST = 560
+local LAST = 610
+
+local SEQ = 0x000F8358
+local QUERY = 0x000F835C
+local VALUE = 0x000F8360
+
+local function frozen(fn)
+    cpu.freeze()
+    local ok, v = pcall(fn)
+    cpu.resume()
+    if not ok then
+        sys.print("SCRIPT ERROR: " .. tostring(v))
+        sys.exit(1)
+    end
+    return v
+end
+
+local function seq()
+    return frozen(function() return mem.read32(SEQ) end)
+end
+
+local deadline = sys.time_ms() + 300000
+while seq() < LAST and sys.time_ms() < deadline do sys.wait_ms(50) end
+if seq() < LAST then
+    sys.print("ONSET TIMEOUT")
+    sys.exit(1)
+end
+
+-- One freeze around the whole sweep: querying 51 entries with the guest
+-- running would let newer swaps evict the older ring slots mid-read.
+local hashes = frozen(function()
+    local out = {}
+    for n = FIRST, LAST do
+        mem.write32(QUERY, n)
+        out[n] = mem.read32(VALUE)
+    end
+    return out
+end)
+for n = FIRST, LAST do
+    sys.print(string.format("ONSET swap=%d hash=%08x", n, hashes[n]))
+end
+sys.print("ONSET DONE")
+sys.exit(0)

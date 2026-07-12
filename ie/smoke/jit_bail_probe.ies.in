@@ -1,0 +1,60 @@
+-- JIT bailout profile at the attract race (LOCAL path: gfx translation
+-- runs on the main M68K so its bailouts show in main's jit_stats).
+-- Answers: how much hot code falls back to the interpreter/helper, and
+-- which opcodes. Line-F (0xF000-0xFFFF) = 68881 FPU; 0xFxxx compares/
+-- transcendentals are the suspected non-native ops.
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@
+
+local RACE_WAIT_TIMEOUT_MS = 480000
+local WARMUP_MIN_SWAPS = 560
+local SPAN_MS = 6000
+
+local function rd(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr+1) * 0x10000
+         + mem.read8(addr+2) * 0x100 + mem.read8(addr+3)
+end
+local function state_ok()
+    dbg.open(); dbg.freeze()
+    local m = rd(STATUS_ADDR); local sw = rd(STATUS_ADDR+16); local st = rd(GAMESTATE_ADDR)
+    dbg.resume(); dbg.close()
+    return m == STATUS_MAGIC and st == 4 and sw >= WARMUP_MIN_SWAPS, sw
+end
+
+sys.print("JIT BAIL: waiting for steady race")
+local deadline = sys.time_ms() + RACE_WAIT_TIMEOUT_MS
+local ok, sw = false, 0
+while sys.time_ms() < deadline do
+    ok, sw = state_ok()
+    if ok then break end
+    sys.wait_ms(1000)
+end
+if not ok then sys.print("JIT BAIL FAIL: race never reached"); sys.exit(1) end
+
+local a = cpu.jit_stats()
+sys.wait_ms(SPAN_MS)
+local b = cpu.jit_stats()
+
+local di = (b.instruction_count or 0) - (a.instruction_count or 0)
+local df = (b.fallback_instructions or 0) - (a.fallback_instructions or 0)
+local dbail = (b.bailouts or 0) - (a.bailouts or 0)
+sys.print(string.format("JIT BAIL PASS: span instrs %d, fallbacks %d (%.3f%%), bailouts %d",
+    di, df, (di > 0) and (df * 100.0 / di) or 0, dbail))
+sys.print(string.format("cumulative: native_blocks %d, fallback_instructions %d",
+    b.native_blocks or 0, b.fallback_instructions or 0))
+
+-- Top bailing opcodes (cumulative histogram)
+local fo = b.fallback_opcodes
+if fo then
+    sys.print("top fallback opcodes (opcode / count / pc):")
+    for i = 1, #fo do
+        local e = fo[i]
+        local cls = "other"
+        if e.opcode >= 0xF000 then cls = "Line-F FPU" end
+        if e.opcode >= 0x8000 and e.opcode < 0x9000 then cls = "div/or/sbcd" end
+        sys.print(string.format("  0x%04X  %-12s count=%d  pc=0x%08X", e.opcode, cls, e.count, e.pc))
+    end
+end
+sys.exit(0)

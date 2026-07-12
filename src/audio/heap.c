@@ -1,5 +1,3 @@
-#include <kos.h>
-#include "kos_undef.h"
 
 #include <ultra64.h>
 #include <macros.h>
@@ -149,6 +147,9 @@ void discard_sequence(s32 seqId) {
 
     for (i = 0; i < SEQUENCE_PLAYERS; i++) {
         if (gSequencePlayers[i].enabled && gSequencePlayers[i].seqId == seqId) {
+#ifdef AUDIO_LOAD_TRACE
+            printf("reset-step disable p%d (resetStatus %d)\n", i, gAudioResetStatus);
+#endif
             sequence_player_disable(&gSequencePlayers[i]);
         }
     }
@@ -550,7 +551,11 @@ s32 audio_shut_down_and_reset_step(void) {
     switch (gAudioResetStatus) {
         case 5:
             for (i = 0; i < SEQUENCE_PLAYERS; i++) {
-                sequence_player_disable(&gSequencePlayers[i]);
+                
+#ifdef AUDIO_LOAD_TRACE
+            printf("reset-late disable p%d\n", i);
+#endif
+            sequence_player_disable(&gSequencePlayers[i]);
             }
             gAudioResetFadeOutFramesLeft = 4;
             gAudioResetStatus--;

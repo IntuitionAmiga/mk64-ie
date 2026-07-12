@@ -3,8 +3,7 @@
 
 #include <PR/ultratypes.h>
 
-// #define sins(x) gSineTable[(u16) (x) >> 4]
-// #define coss(x) gCosineTable[(u16) (x) >> 4]
+#include "buffers/trig_tables.h"
 
 // #define min(a, b) ((a) <= (b) ? (a) : (b))
 // #define max(a, b) ((a) > (b) ? (a) : (b))
@@ -62,26 +61,29 @@ u16 random_u16(void);
 u16 random_int(u16);
 s16 func_802B7F34(f32, f32, f32, f32);
 void func_802B7F7C(Vec3f, Vec3f, Vec3s);
-f32 sins(u16);
-f32 coss(u16);
-//#include <kos.h>
-#if 0
-#define F_PI 3.1415926f
-static inline f32 sins(u16 arg0) {
-//    return gSineTable[arg0 >> 4];
-    float farg0 = ((float)(arg0 / 16.0f) / 1024.0f) * F_PI * 0.5f;
-    return sinf(farg0);
+/* N64-faithful table trig for u16 binary angles (0x10000 == full
+ * turn). Table lookups instead of sinf/cosf: under emulation the libm
+ * calls cost hundreds of instructions each (dispatch overhead, even
+ * with -m68881 hard float) and these are among the hottest leaf calls
+ * in the game loop. */
+static inline f32 sins(u16 angle) {
+    return gSineTable[angle >> 4];
 }
 
-//#define gCosineTable (gSineTable + 0x400)
-
-static inline f32 coss(u16 arg0) {
-//    return gCosineTable[arg0 >> 4];
-    float farg0 = ((float)(arg0 / 16.0f) / 1024.0f) * F_PI * 0.5f;
-    return cosf(farg0);
+static inline f32 coss(u16 angle) {
+    return gCosineTable[angle >> 4];
 }
-#undef F_PI
-#endif
+
+/* Shared helpers for the common "sin and cos of a u16 binary angle" pattern. */
+static inline void sincoss(u16 angle, f32* s, f32* c) {
+    *s = sins(angle);
+    *c = coss(angle);
+}
+
+static inline void scaled_sincoss(u16 angle, f32* s, f32* c, f32 scale) {
+    *s = sins(angle) * scale;
+    *c = coss(angle) * scale;
+}
 
 s32 is_visible_between_angle(u16, u16, u16);
 f32 is_within_render_distance(Vec3f, Vec3f, u16, f32, f32, f32);

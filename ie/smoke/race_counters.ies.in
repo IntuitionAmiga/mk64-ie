@@ -1,0 +1,60 @@
+-- Per-frame Voodoo MMIO accounting at the attract race steady state.
+-- Local path (IE_PERF_COUNTERS build). Answers: how much real MMIO
+-- survives the RAM command-buffer + tex-slot design? mmio_writes/frame,
+-- cmd_submits (flushes), cmd_pairs (register writes buffered into RAM),
+-- tex_stream_bytes (cold per-texel MMIO), tris.
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634
+local PERF_ADDR = 0x0009F100
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@
+
+local RACE_WAIT_TIMEOUT_MS = 480000
+local WARMUP_MIN_SWAPS = 560
+local SAMPLES = 15
+local SAMPLE_MS = 150
+
+local NAMES = { {"tris",1}, {"tex_stream_bytes",3}, {"draw_calls",4},
+                {"mmio_writes",5}, {"cmd_submits",6}, {"cmd_pairs",7} }
+
+local function rd(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr+1) * 0x10000
+         + mem.read8(addr+2) * 0x100 + mem.read8(addr+3)
+end
+local function snap()
+    local o = {}
+    dbg.open(); dbg.freeze()
+    o.magic = rd(STATUS_ADDR); o.swaps = rd(STATUS_ADDR+16); o.state = rd(GAMESTATE_ADDR)
+    for _,c in ipairs(NAMES) do o[c[1]] = rd(PERF_ADDR + 8 + c[2]*4) end
+    dbg.resume(); dbg.close()
+    return o
+end
+
+sys.print("RACE COUNTERS: waiting for steady race")
+local deadline = sys.time_ms() + RACE_WAIT_TIMEOUT_MS
+local s = nil
+while sys.time_ms() < deadline do
+    s = snap()
+    if s.magic == STATUS_MAGIC and s.state == 4 and s.swaps >= WARMUP_MIN_SWAPS then break end
+    sys.wait_ms(1000)
+end
+if s == nil or s.state ~= 4 or s.swaps < WARMUP_MIN_SWAPS then
+    sys.print("RACE COUNTERS FAIL: steady race never reached"); sys.exit(1)
+end
+
+local sum = {}
+for _,c in ipairs(NAMES) do sum[c[1]] = 0 end
+local n = 0
+for i = 1, SAMPLES do
+    local x = snap()
+    if x.state == 4 then
+        for _,c in ipairs(NAMES) do sum[c[1]] = sum[c[1]] + x[c[1]] end
+        n = n + 1
+    end
+    sys.wait_ms(SAMPLE_MS)
+end
+sys.print(string.format("RACE COUNTERS PASS: %d per-frame samples at swap ~%d", n, s.swaps))
+for _,c in ipairs(NAMES) do
+    sys.print(string.format("  %-16s %.1f /frame", c[1], sum[c[1]] / n))
+end
+sys.exit(0)

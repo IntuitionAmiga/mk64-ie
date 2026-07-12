@@ -1,0 +1,189 @@
+-- Manual race state probe. Drives the normal front-end into a 1P Mario GP race,
+-- then dumps the manual-race viewport/player state and captures a screenshot.
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634
+
+local ADDR = {
+    gGamestate = 0x1061a770,
+    gGamestateNext = 0x1061a774,
+    gPlayerOne = 0x1061a744,
+    gPlayerOneCopy = 0x1061a764,
+    D_800DC5EC = 0x1060f6e0,
+    D_800DC5F0 = 0x1060f6e4,
+    D_800DC5F4 = 0x1060f6e8,
+    D_800DC5F8 = 0x1060f6ec,
+    gPlayers = 0x110fe6d0,
+    cameras = 0x1105fd50,
+    gCurrentCourseId = 0x110600e0,
+    D_800DC5B8 = 0x110600ea,
+    D_800DC5C8 = 0x110600f2,
+    gScreenAspect = 0x1110677e,
+    D_800DC510 = 0x111089d4,
+    gDemoMode = 0x111089da,
+    gActiveScreenMode = 0x111089de,
+    gScreenModeSelection = 0x111089e2,
+    gModeSelection = 0x111089ea,
+    gCCSelection = 0x111089f6,
+    gGotoMode = 0x1110675a,
+    gMenuSelection = 0x1061bd58,
+    gMainMenuSelection = 0x11109ef1,
+    gPlayerSelectMenuSelection = 0x11109ef2,
+    gGameModeMenuColumn = 0x11109f14,
+    gGameModeSubMenuColumn = 0x11109f18,
+    D_8015F894 = 0x110604f6,
+    D_802BA034 = 0x111127a0,
+}
+
+local SHOT_PATH = SHOT_PATH or "build/ie/manual_race_state_probe.png"
+local REPORT_PATH = REPORT_PATH or "build/ie/manual_race_state_probe.txt"
+local WARMUP_MS = WARMUP_MS or 70000
+
+local KEY_ENTER = 0x1C
+local KEY_X = 0x2D
+
+local function rd8(addr)
+    return mem.read8(addr)
+end
+
+local function rd_be16(addr)
+    return rd8(addr) * 0x100 + rd8(addr + 1)
+end
+
+local function rd_be_s16(addr)
+    local v = rd_be16(addr)
+    if v >= 0x8000 then v = v - 0x10000 end
+    return v
+end
+
+local function rd_be32(addr)
+    return rd8(addr) * 0x1000000 + rd8(addr + 1) * 0x10000
+        + rd8(addr + 2) * 0x100 + rd8(addr + 3)
+end
+
+local function ptr(addr)
+    return rd_be32(addr)
+end
+
+local function press(code, after_ms)
+    term.key_press(code, 70)
+    sys.wait_ms(after_ms or 500)
+end
+
+local function status()
+    return rd_be32(STATUS_ADDR), rd_be32(STATUS_ADDR + 16), rd_be32(ADDR.gGamestate)
+end
+
+local function sample_status()
+    dbg.open()
+    dbg.freeze()
+    local magic, swaps, state = status()
+    dbg.resume()
+    dbg.close()
+    return magic, swaps, state
+end
+
+local function wrapper_line(name, ptr_addr)
+    local p = ptr(ptr_addr)
+    if p == 0 then
+        return string.format("%s ptr=0", name)
+    end
+    local vw = rd_be_s16(p + 0x10)
+    local vh = rd_be_s16(p + 0x12)
+    local vx = rd_be_s16(p + 0x18)
+    local vy = rd_be_s16(p + 0x1A)
+    local sw = rd_be_s16(p + 0x2C)
+    local sh = rd_be_s16(p + 0x2E)
+    local sx = rd_be_s16(p + 0x30)
+    local sy = rd_be_s16(p + 0x32)
+    return string.format(
+        "%s ptr=0x%08X screen=%d,%d start=%d,%d viewport_scale=%d,%d viewport_trans=%d,%d",
+        name, p, sw, sh, sx, sy, vw, vh, vx, vy)
+end
+
+local function player_line(label, p)
+    local typ = rd_be16(p + 0x0000)
+    local unk002 = rd_be16(p + 0x0002)
+    local rank = rd_be_s16(p + 0x0004)
+    local sound = rd_be32(p + 0x000C)
+    local posx = rd_be32(p + 0x0014)
+    local posy = rd_be32(p + 0x0018)
+    local posz = rd_be32(p + 0x001C)
+    local rot0 = rd_be_s16(p + 0x002C)
+    local rot1 = rd_be_s16(p + 0x002E)
+    local rot2 = rd_be_s16(p + 0x0030)
+    local effects = rd_be32(p + 0x00BC)
+    local unk0ca = rd_be_s16(p + 0x00CA)
+    local char = rd_be16(p + 0x0254)
+    return string.format(
+        "%s addr=0x%08X type=0x%04X unk002=0x%04X rank=%d char=%d sound=0x%08X effects=0x%08X unk0CA=0x%04X pos_bits=%08X,%08X,%08X rot=%d,%d,%d",
+        label, p, typ, unk002, rank, char, sound, effects, bit32.band(unk0ca, 0xFFFF), posx, posy, posz, rot0, rot1, rot2)
+end
+
+local magic, swaps, state = sample_status()
+local deadline = sys.time_ms() + WARMUP_MS
+
+-- Normal manual route with defaults: title Start, GP, 50cc, Mario, Mushroom Cup.
+while sys.time_ms() < deadline do
+    magic, swaps, state = sample_status()
+    if magic == MAGIC and swaps > 30 then break end
+    sys.wait_ms(100)
+end
+
+for i = 1, 4 do
+    press(KEY_ENTER, 900)
+end
+for i = 1, 9 do
+    press(KEY_X, 1100)
+end
+
+while sys.time_ms() < deadline do
+    magic, swaps, state = sample_status()
+    if magic == MAGIC and state == 4 and swaps > 120 then
+        break
+    end
+    sys.wait_ms(250)
+end
+
+if state == 4 then
+    sys.wait_ms(14000)
+else
+    sys.wait_ms(1000)
+end
+
+dbg.open()
+dbg.freeze()
+magic, swaps, state = status()
+
+local report = {}
+local dim_w, dim_h = video.get_dimensions()
+report[#report + 1] = string.format("MANUAL_STATE magic=0x%08X swaps=%d state=%d dim=%dx%d frame=0x%08X",
+    magic, swaps, state, dim_w, dim_h, video.frame_hash())
+report[#report + 1] = string.format("mode active=%d selection=%d mode=%d cc=%d demo=%d course=%d D_8015F894=%d D_800DC510=%d D_800DC5B8=%d D_800DC5C8=%d screenAspectBits=0x%08X zoomBits=0x%08X",
+    rd_be32(ADDR.gActiveScreenMode), rd_be32(ADDR.gScreenModeSelection), rd_be32(ADDR.gModeSelection),
+    rd_be32(ADDR.gCCSelection), rd_be32(ADDR.gDemoMode), rd_be32(ADDR.gCurrentCourseId),
+    rd_be16(ADDR.D_8015F894), rd_be32(ADDR.D_800DC510), rd_be16(ADDR.D_800DC5B8),
+    rd_be16(ADDR.D_800DC5C8), rd_be32(ADDR.gScreenAspect), rd_be32(ADDR.D_802BA034))
+report[#report + 1] = string.format("frontend gameNext=%d goto=%d menu=%d mainMenu=%d playerSelect=%d gameModeCol0=%d subMode00=%d charSel0=%d",
+    rd_be32(ADDR.gGamestateNext), rd_be32(ADDR.gGotoMode), rd_be32(ADDR.gMenuSelection),
+    rd8(ADDR.gMainMenuSelection), rd8(ADDR.gPlayerSelectMenuSelection),
+    rd8(ADDR.gGameModeMenuColumn), rd8(ADDR.gGameModeSubMenuColumn), rd8(ADDR.gCharacterGridSelections))
+report[#report + 1] = wrapper_line("D_800DC5EC", ADDR.D_800DC5EC)
+report[#report + 1] = wrapper_line("D_800DC5F0", ADDR.D_800DC5F0)
+report[#report + 1] = wrapper_line("D_800DC5F4", ADDR.D_800DC5F4)
+report[#report + 1] = wrapper_line("D_800DC5F8", ADDR.D_800DC5F8)
+report[#report + 1] = string.format("gPlayerOnePtr=0x%08X gPlayerOneCopyPtr=0x%08X",
+    ptr(ADDR.gPlayerOne), ptr(ADDR.gPlayerOneCopy))
+for i = 0, 7 do
+    report[#report + 1] = player_line("player" .. i, ADDR.gPlayers + i * 0xDD8)
+end
+
+dbg.resume()
+dbg.close()
+
+local text = table.concat(report, "\n") .. "\n"
+sys.print(text)
+sys.write_file(REPORT_PATH, text)
+rec.screenshot(SHOT_PATH)
+sys.print(string.format("MANUAL_STATE wrote %s and %s", REPORT_PATH, SHOT_PATH))
+sys.exit(0)

@@ -1,0 +1,87 @@
+-- Stage 3 subsystem 9 boot smoke: the full game image boots through
+-- the FILE-device loader, initialises every backend, and renders
+-- continuously. Verifies the frame heartbeat the window backend
+-- publishes (status block +16 swap counter) advances and that the
+-- compositor shows non-black content (the N64 boot logo / menus).
+--
+-- The game runs at interpreter/JIT speed (a few frames per second on
+-- soft-float), so thresholds are about liveness, not frame rate.
+--
+-- Run: make ie-game-smoke
+
+local STATUS_ADDR = 0x0009F000
+local MAGIC = 0x4D4B3634 -- 'MK64'
+local BOOT_TIMEOUT_MS = 90000
+local MEASURE_MS = 20000
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local swaps = read_be32(STATUS_ADDR + 16)
+    dbg.resume()
+    dbg.close()
+    return magic, swaps
+end
+
+-- Boot: wait until the window backend has swapped a few frames.
+local deadline = sys.time_ms() + BOOT_TIMEOUT_MS
+local magic, swaps = 0, 0
+while sys.time_ms() < deadline do
+    magic, swaps = sample()
+    if magic == MAGIC and swaps >= 3 then
+        break
+    end
+    sys.wait_ms(1000)
+end
+
+if magic ~= MAGIC or swaps < 3 then
+    sys.print(string.format("SMOKE FAIL: game did not boot (magic 0x%08X swaps %d)", magic, swaps))
+    sys.exit(1)
+end
+
+-- Liveness: frames keep coming.
+sys.wait_ms(MEASURE_MS)
+local _, swaps2 = sample()
+if swaps2 <= swaps then
+    sys.print(string.format("SMOKE FAIL: frame counter stalled at %d", swaps))
+    sys.exit(1)
+end
+
+-- Content: some compositor row shows non-black pixels. The boot
+-- sequence animates (logo fades), so poll a few rows until content
+-- appears.
+local lit = 0
+local content_deadline = sys.time_ms() + 90000
+while sys.time_ms() < content_deadline do
+    for _, y in ipairs({ 360, 450, 540, 630, 720 }) do
+        local row = video.get_region(0, y, 1920, 1)
+        if row ~= nil and #row >= 1920 * 4 then
+            for x = 0, 1919, 4 do
+                local i = x * 4
+                if string.byte(row, i + 1) + string.byte(row, i + 2) + string.byte(row, i + 3) > 30 then
+                    lit = lit + 1
+                end
+            end
+        end
+    end
+    if lit >= 10 then
+        break
+    end
+    lit = 0
+    sys.wait_ms(1000)
+end
+if lit < 10 then
+    sys.print(string.format("SMOKE FAIL: frame content dark (lit=%d)", lit))
+    sys.exit(1)
+end
+
+sys.print(string.format(
+    "SMOKE PASS: game boots and renders (%d -> %d swaps, %d lit samples)",
+    swaps, swaps2, lit))
+sys.exit(0)

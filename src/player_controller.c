@@ -22,32 +22,6 @@
 #include "cpu_vehicles_camera_path.h"
 #include "sounds.h"
 
-static inline void sincoss(u16 arg0, f32* s, f32* c) {
-    register float __s __asm__("fr2");
-    register float __c __asm__("fr3");
-
-    asm("lds    %2,fpul\n\t"
-        "fsca    fpul,dr2\n\t"
-        : "=f"(__s), "=f"(__c)
-        : "r"(arg0)
-        : "fpul");
-
-    *s = __s;
-    *c = __c;
-}
-static inline void scaled_sincoss(u16 arg0, f32* s, f32* c, f32 scale) {
-    register float __s __asm__("fr2");
-    register float __c __asm__("fr3");
-
-    asm("lds    %2,fpul\n\t"
-        "fsca    fpul,dr2\n\t"
-        : "=f"(__s), "=f"(__c)
-        : "r"(arg0)
-        : "fpul");
-
-    *s = __s * scale;
-    *c = __c * scale;
-}
 
 extern s32 D_8018D168;
 
@@ -648,9 +622,6 @@ void func_80028E70(Player* player, Camera* camera, s8 playerId, s8 screenId) {
                 break;
         }
     }
-}
-
-UNUSED void func_80028F5C(UNUSED s32 arg0, UNUSED s32 arg1, UNUSED s32 arg2, UNUSED s32 arg3) {
 }
 
 void func_80028F70(void) {
@@ -1314,12 +1285,12 @@ void func_8002AE38(Player* player, s8 arg1, f32 arg2, f32 arg3, f32 arg4, f32 ar
     s16 temp_a0;
     s32 var_v1;
 
-    scaled_sincoss(-player->rotation[1], &sp28, &temp_f16, player->speed);
+//    scaled_sincoss(-player->rotation[1], &sp28, &temp_f16, player->speed);
 
-//    sp28 = (sins(-player->rotation[1]) * player->speed) + arg2;
-//    temp_f16 = (coss(-player->rotation[1]) * player->speed) + arg3;
-    sp28 += arg2;// = (sp28 * player->speed) + arg2;
-    temp_f16 += arg3;// = (temp_f16 * player->speed) + arg3;
+    sp28 = (sins(-player->rotation[1]) * player->speed) + arg2;
+    temp_f16 = (coss(-player->rotation[1]) * player->speed) + arg3;
+//    sp28 += arg2;// = (sp28 * player->speed) + arg2;
+//    temp_f16 += arg3;// = (temp_f16 * player->speed) + arg3;
 
     if (((player->effects & 0x800) != 0x800) && ((player->effects & UNKNOWN_EFFECT_0x10) != UNKNOWN_EFFECT_0x10) &&
         !(player->unk_044 & 0x4000) &&
@@ -1511,52 +1482,6 @@ void func_8002B830(Player* player, s8 playerId, s8 screenId) {
     if ((player->unk_044 & 0x400) != 0) {
         func_800911B4(player, playerId);
     }
-}
-
-UNUSED void func_8002B8A4(Player* player_one, Player* player_two) {
-    s32 var_v1;
-
-    // clang-format off
-    /*
-    if's are being done bracket-less on purpose,
-    Technically only the `player_one == gPlayerEight` NEEDS to be
-    bracket-less that looks weird
-    */
-    if (player_one == gPlayerOne) {   var_v1 = 0;
-}
-    if (player_one == gPlayerTwo) {   var_v1 = 1;
-}
-    if (player_one == gPlayerThree) { var_v1 = 2;
-}
-    if (player_one == gPlayerFour) {  var_v1 = 3;
-}
-    if (player_one == gPlayerFive) {  var_v1 = 4;
-}
-    if (player_one == gPlayerSix) {   var_v1 = 5;
-}
-    if (player_one == gPlayerSeven) { var_v1 = 6;
-}
-    if (player_one == gPlayerEight) { var_v1 = 7;
-}
-    D_801653C0[var_v1] = player_two;
-    if (player_two == gPlayerOne) {   var_v1 = 0;
-}
-    if (player_two == gPlayerTwo) {   var_v1 = 1;
-}
-    if (player_two == gPlayerThree) { var_v1 = 2;
-}
-    if (player_two == gPlayerFour) {  var_v1 = 3;
-}
-    if (player_two == gPlayerFive) {  var_v1 = 4;
-}
-    if (player_two == gPlayerSix) {   var_v1 = 5;
-}
-    if (player_two == gPlayerSeven) { var_v1 = 6;
-}
-    if (player_two == gPlayerEight) { var_v1 = 7;
-}
-    D_801653C0[var_v1] = player_one;
-    // clang-format on
 }
 
 void func_8002B9CC(Player* player, s8 arg1, UNUSED s32 arg2) {
@@ -2165,10 +2090,12 @@ void func_8002D268(Player* player, UNUSED Camera* camera, s8 screenId, s8 player
         spAC = 0 * (player->unk_064[2] + sp16C[2]);
     }
 
-    sincoss(player->rotation[1] + player->unk_0C0, &ts1, &tc1);
+    //sincoss(player->rotation[1] + player->unk_0C0, &ts1, &tc1);
 
-    temp_f2_2 = ((player->oldPos[2] - player->pos[2]) * tc1) + //coss(player->rotation[1] + player->unk_0C0)) +
-                (-(player->oldPos[0] - player->pos[0]) * ts1); //sins(player->rotation[1] + player->unk_0C0));
+    temp_f2_2 = ((player->oldPos[2] - player->pos[2]) * //tc1) + //
+    coss(player->rotation[1] + player->unk_0C0)) +
+                (-(player->oldPos[0] - player->pos[0]) * //ts1); //
+                sins(player->rotation[1] + player->unk_0C0));
     if (temp_f2_2 > 0.1) {
         player->unk_044 |= 8;
     } else {

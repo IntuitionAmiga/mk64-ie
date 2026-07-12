@@ -1,0 +1,56 @@
+-- Race-scene screenshot diagnostic. Warms the attract demo into its
+-- first RACING span, then captures a mid-race frame (screenshot + frame
+-- hash) so a good/bad engine build can be compared at matched swaps.
+--
+-- Output path and target swap come from globals injected via -D or a
+-- wrapper; defaults below. Run headless against the mk64 pack.
+
+local STATUS_ADDR    = 0x0009F000
+local MAGIC          = 0x4D4B3634 -- 'MK64'
+local GAMESTATE_ADDR = 0x10619d20 -- s32 gGamestate; RACING == 4
+local SHOT_PATH      = SHOT_PATH or "build/ie/diag_shot.png"
+local TARGET_SWAP    = TARGET_SWAP or 760
+local WARMUP_MS      = 480000
+local POLL_MS        = 200
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local magic = read_be32(STATUS_ADDR)
+    local swaps = read_be32(STATUS_ADDR + 16)
+    local state = read_be32(GAMESTATE_ADDR)
+    dbg.resume()
+    dbg.close()
+    return magic, swaps, state
+end
+
+local deadline = sys.time_ms() + WARMUP_MS
+local swaps, state = 0, -1
+while sys.time_ms() < deadline do
+    local magic
+    magic, swaps, state = sample()
+    if magic == MAGIC and state == 4 and swaps >= TARGET_SWAP then
+        break
+    end
+    sys.wait_ms(POLL_MS)
+end
+
+if not (state == 4 and swaps >= TARGET_SWAP) then
+    sys.print(string.format("DIAG FAIL: never reached RACING swap %d (last swaps=%d state=%d)",
+        TARGET_SWAP, swaps, state))
+    sys.exit(1)
+end
+
+-- Let a couple of clean frames present (no freeze -> no mid-swap stall).
+sys.wait_ms(400)
+local h = video.frame_hash()
+rec.screenshot(SHOT_PATH)
+sys.print(string.format("DIAG SHOT: swaps=%d state=%d frame_hash=0x%08X path=%s",
+    swaps, state, h, SHOT_PATH))
+sys.wait_ms(200)
+sys.exit(0)

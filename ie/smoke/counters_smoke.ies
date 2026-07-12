@@ -1,0 +1,65 @@
+-- Perf-counter smoke: the gfx smoke image renders through the shared
+-- translator and Voodoo backend. With IE_PERF_COUNTERS enabled, frame
+-- end publishes the previous frame's counters at IE_PERF_DUMP_ADDR.
+
+local PERF_ADDR = 0x0009F100
+local MAGIC = 0x50455246
+
+local COUNTER_BASE = PERF_ADDR + 8
+local PC_TRIS = 1
+local PC_TEX_IMPORTS = 2
+local PC_DRAW_CALLS = 4
+local PC_MMIO_WRITES = 5
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000
+        + mem.read8(addr + 1) * 0x10000
+        + mem.read8(addr + 2) * 0x100
+        + mem.read8(addr + 3)
+end
+
+local function sample()
+    dbg.open()
+    dbg.freeze()
+    local out = {
+        magic = read_be32(PERF_ADDR),
+        frame = read_be32(PERF_ADDR + 4),
+        tris = read_be32(COUNTER_BASE + PC_TRIS * 4),
+        imports = read_be32(COUNTER_BASE + PC_TEX_IMPORTS * 4),
+        draws = read_be32(COUNTER_BASE + PC_DRAW_CALLS * 4),
+        mmio = read_be32(COUNTER_BASE + PC_MMIO_WRITES * 4),
+    }
+    dbg.resume()
+    dbg.close()
+    return out
+end
+
+local deadline = sys.time_ms() + 10000
+local magic = 0
+local frame = 0
+local tris = 0
+local imports = 0
+local draws = 0
+local mmio = 0
+
+while sys.time_ms() < deadline do
+    local s = sample()
+    magic = s.magic
+    frame = s.frame
+    tris = s.tris
+    imports = s.imports
+    draws = s.draws
+    mmio = s.mmio
+    if magic == MAGIC and frame > 0 and tris > 0 and draws > 0 and mmio > 0 then
+        sys.print(string.format(
+            "SMOKE PASS: counters frame %d tris %d draws %d imports %d mmio %d",
+            frame, tris, draws, imports, mmio))
+        sys.exit(0)
+    end
+    sys.wait_ms(50)
+end
+
+sys.print(string.format(
+    "SMOKE FAIL: counters missing (magic 0x%08X frame %d tris %d draws %d imports %d mmio %d)",
+    magic, frame, tris, draws, imports, mmio))
+sys.exit(1)

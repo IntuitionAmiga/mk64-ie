@@ -33,7 +33,7 @@
 #include "libultra_internal.h"
 #include <PR/gu.h>
 
-void guMtxXFMF(Mtx*, float, float, float, float*, float*, float*);
+void guMtxXFMF(float mf[4][4], float, float, float, float*, float*, float*);
 void guMtxCatF(float mf[4][4], float nf[4][4], float res[4][4]);
 #ifndef GBI_FLOATS
 void guMtxCatL(Mtx* m, Mtx* n, Mtx* res) {
@@ -56,10 +56,10 @@ void guMtxXFML(Mtx* m, float x, float y, float z, float* ox, float* oy, float* o
 }
 #else
 void guMtxCatL(Mtx* m, Mtx* n, Mtx* res) {
-    guMtxCatF(m, n, res);
+    guMtxCatF(m->m, n->m, res->m);
 }
 
 void guMtxXFML(Mtx* m, float x, float y, float z, float* ox, float* oy, float* oz) {
-    guMtxXFMF(m, x, y, z, ox, oy, oz);
+    guMtxXFMF(m->m, x, y, z, ox, oy, oz);
 }
 #endif

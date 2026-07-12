@@ -1,0 +1,117 @@
+-- Manual-driving PC-sampling profiler.
+--
+-- Same race gating as drive_profile.ies: boot windowed, pick a course,
+-- drive. After the settle window it repeatedly freezes the CPU, reads
+-- the M68K PC, and resumes - a statistical profile of where guest time
+-- goes. Samples are bucketed to 1KB and the hottest buckets printed;
+-- map them to functions with build/ie/game.map. Freeze overhead
+-- depresses absolute fps during sampling; the DISTRIBUTION stays valid.
+--
+-- Run:
+--   env IE_NO_IPC=1 IE_M68K_JIT_DISPATCH_HASH=0 \
+--     ../IntuitionEngine/bin/IntuitionEngine -file-root . \
+--     build/ie/mariokart64.ie68 -script build/ie/pc_sample.ies
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634 -- 'MK64'
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@ -- s32 gGamestate; RACING == 4
+
+local RACE_WAIT_TIMEOUT_MS = 600000
+local SETTLE_SWAPS = 400
+local SETTLE_TIMEOUT_MS = 180000
+local SAMPLES = 1500
+local SAMPLE_WAIT_MS = 20 -- ~50Hz attempt; freeze cost makes it slower
+local BUCKET = 1024
+local TOP = 50
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function status_sample()
+    local out = {}
+    dbg.open()
+    dbg.freeze()
+    out.status_magic = read_be32(STATUS_ADDR)
+    out.swaps = read_be32(STATUS_ADDR + 16)
+    out.state = read_be32(GAMESTATE_ADDR)
+    dbg.resume()
+    dbg.close()
+    return out
+end
+
+sys.print("PC SAMPLE: waiting for a manual race - pick a course and DRIVE")
+local deadline = sys.time_ms() + RACE_WAIT_TIMEOUT_MS
+local s = nil
+while sys.time_ms() < deadline do
+    s = status_sample()
+    if s.status_magic == STATUS_MAGIC and s.state == 4 then
+        break
+    end
+    sys.wait_ms(2000)
+end
+if s == nil or s.status_magic ~= STATUS_MAGIC or s.state ~= 4 then
+    sys.print("PC SAMPLE FAIL: no race reached before timeout")
+    sys.exit(1)
+end
+
+local settle_target = s.swaps + SETTLE_SWAPS
+sys.print(string.format(
+    "PC SAMPLE: race detected at swap %d, settling until swap %d...",
+    s.swaps, settle_target))
+deadline = sys.time_ms() + SETTLE_TIMEOUT_MS
+while sys.time_ms() < deadline do
+    sys.wait_ms(2000)
+    s = status_sample()
+    if s.state ~= 4 then
+        sys.print("PC SAMPLE FAIL: left the race during settle")
+        sys.exit(1)
+    end
+    if s.swaps >= settle_target then
+        break
+    end
+end
+if s.swaps < settle_target then
+    sys.print("PC SAMPLE FAIL: settle timeout")
+    sys.exit(1)
+end
+
+sys.print(string.format("PC SAMPLE: taking %d samples - KEEP DRIVING", SAMPLES))
+local buckets = {}
+local taken = 0
+local t0 = sys.time_ms()
+for i = 1, SAMPLES do
+    dbg.open()
+    dbg.freeze()
+    local pc = dbg.get_pc()
+    dbg.resume()
+    dbg.close()
+    if pc ~= nil then
+        local b = math.floor(pc / BUCKET) * BUCKET
+        buckets[b] = (buckets[b] or 0) + 1
+        taken = taken + 1
+    end
+    sys.wait_ms(SAMPLE_WAIT_MS)
+end
+local elapsed_s = (sys.time_ms() - t0) / 1000.0
+
+s = status_sample()
+if s.state ~= 4 then
+    sys.print("PC SAMPLE WARNING: race ended during sampling - tail samples may be menus")
+end
+
+local sorted = {}
+for addr, count in pairs(buckets) do
+    sorted[#sorted + 1] = { addr = addr, count = count }
+end
+table.sort(sorted, function(a, b) return a.count > b.count end)
+
+sys.print(string.format("PC SAMPLE PASS: %d samples in %.1f s, %d distinct 1KB buckets",
+    taken, elapsed_s, #sorted))
+for i = 1, math.min(TOP, #sorted) do
+    local e = sorted[i]
+    sys.print(string.format("PC 0x%08X %d (%.1f%%)",
+        e.addr, e.count, e.count * 100.0 / taken))
+end
+sys.exit(0)

@@ -1,5 +1,6 @@
 #include <ultra64.h>
 #include <macros.h>
+#include <asset_endian.h>
 #include <common_structs.h>
 #include <defines.h>
 #include <decode.h>
@@ -90,8 +91,9 @@ void load_course_ghost(void) {
                 segmented_to_virtual(D_80162DC4),
                 0x4000);
 
+    /* Staff ghost data is stored big-endian; normalise for native reads. */
     for (int i=0;i<0x1000;i++) {
-        D_80162DA4[i] = __builtin_bswap32(D_80162DA4[i]);
+        D_80162DA4[i] = asset_be_u32(&D_80162DA4[i]);
     }
 #endif
     D_80162D9C = (*D_80162DA4 & REPLAY_FRAME_COUNTER);

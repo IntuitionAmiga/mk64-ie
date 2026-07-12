@@ -1,0 +1,28 @@
+local S = 0x0009F000
+local function read_u32(addr)
+    -- cpu.freeze() is the lightweight raw-memory gate; dbg.freeze() routes
+    -- through the monitor and can deadlock against a busy-polling worker.
+    cpu.freeze()
+    local value = mem.read8(addr) * 0x1000000 + mem.read8(addr+1) * 0x10000
+                + mem.read8(addr+2) * 0x100 + mem.read8(addr+3)
+    cpu.resume()
+    return value
+end
+local deadline = sys.time_ms() + 20000
+while read_u32(S) ~= 0x4D4B3634 and sys.time_ms() < deadline do sys.wait_ms(100) end
+if read_u32(S + 16) == 0x0F then
+    local main_us = read_u32(S + 28)
+    local worker_us = read_u32(S + 32)
+    local main_sweep_us = read_u32(S + 36)
+    local worker_sweep_us = read_u32(S + 40)
+    sys.print("M68K ECHO CALLER PASS: high-RAM BE, Voodoo MMIO, IE64 dispatch")
+    sys.print(string.format(
+        "M68K ECHO THROUGHPUT: main=%dus/op worker=%dus/op (4KiB sweep + Voodoo write + IE64 dispatch)",
+        main_us, worker_us))
+    sys.print(string.format(
+        "M68K ECHO THROUGHPUT (sweep only): main=%dus/op worker=%dus/op",
+        main_sweep_us, worker_sweep_us))
+    sys.exit(0)
+end
+sys.print(string.format("M68K ECHO CALLER FAIL: dst=%08x flags=%08x", read_u32(S+20), read_u32(S+24)))
+sys.exit(1)

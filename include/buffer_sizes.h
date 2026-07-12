@@ -19,6 +19,11 @@
 
 #define COURSE_BUF_SIZE 146464
 #define UNPACK_BUF_SIZE 51008
+// unpacked course displaylists: worst-case ALIGN16(finalDisplaylistOffset) + 8
+// over all courses (Luigi Raceway), per the ROM course table
+#define UNPACKED_DL_BUF_SIZE 51016
+// largest <course>_offsets.bin (segment 9: texture table + displaylist tables)
+#define COURSE_OFFSETS_BUF_SIZE 1232
 #define CEREMONY_BUF_SIZE 36232
 #define COMP_VERT_BUF_SIZE 65536
 #define DECOMP_VERT_BUF_SIZE 228656

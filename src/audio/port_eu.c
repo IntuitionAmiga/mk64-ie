@@ -21,7 +21,35 @@ OSMesgQueue D_801937D8 = {0};
 OSMesgQueue D_801937F0 = {0};
 OSMesgQueue D_80193808 = {0};
 
+#ifdef IE_AUDIO_SERVICE
+/* Audio service worker pass: the command ring is the MAIN image's
+ * sAudioCmd array in guest RAM (the producer side stays on the main CPU).
+ * Bound once at OP_AUDIO_INIT. */
+struct EuAudioCmd *sAudioCmd;
+/* Pending (start,end) range handed over by the service dispatch loop in
+ * place of the OSMesg mailbox: end | start<<8, same packing func_800CBCB0
+ * expects. */
+volatile u32 ie_audio_svc_cmd_word;
+volatile u32 ie_audio_svc_cmd_avail;
+
+void ie_audio_svc_bind_cmds(void *ring) {
+    sAudioCmd = (struct EuAudioCmd *) ring;
+}
+
+void ie_audio_svc_set_load_active(u32 on);
+#else
 struct EuAudioCmd sAudioCmd[0x100] = {0};
+#define ie_audio_svc_set_load_active(on) ((void) 0)
+#endif
+
+#if defined(IE_AUDIO_SVC) && !defined(IE_AUDIO_SERVICE)
+/* Same fence ie_mmio.h provides; declared locally to keep the audio TU free
+ * of the IE MMIO header. */
+static inline void ie_audio_svc_barrier(void) {
+    __asm__ volatile("" ::: "memory");
+}
+#define ie_compiler_barrier ie_audio_svc_barrier
+#endif
 
 // Seems oversized by 1
 OSMesg D_80194020[2] = {0};
@@ -55,53 +83,56 @@ char port_eu_unused_string7[] = "Undefined Port Command %d\n";
 extern volatile s32 gPresetId;
 extern volatile s32 gPresetSent;
 
-void create_next_audio_buffer(s16* samples, u32 num_samples) {
-//    static s32 gMaxAbiCmdCnt = 128;   
-    s32 abiCmdCount = 0;
-//    OSMesg specId = {0};
+void ie_audio_voice_frame_begin(void);
+void ie_audio_voice_update(s32 updateIndex);
+void ie_audio_voice_reset_all(void);
+
+void game_audio_pump_voices(void) {
     OSMesg msg = {0};
+    s32 i = 0;
+    static u8 reset_seen;
 
     if (gAudioFrameCount == 0) {
         gAudioRandom = osGetTime();
     }
 
     gAudioFrameCount++;
-//    gCurrAiBufferIndex %= 3;
-
     gCurrAudioFrameDmaCount = 0;
-//    if (gPresetSent) {
-  //      gPresetSent = 0;
-    //    gAudioResetPresetIdToLoad = (u8)gPresetId;
-      //  gAudioResetStatus = 5;
-   // }
-    
-//      if (AosRecvMesg(D_800EA3B0, &specId, 0) != -1) {
-  //      gAudioResetPresetIdToLoad = (u8)(u32)specId;
-        //printf("got preset %08x\n", gAudioResetPresetIdToLoad);
-    //    gAudioResetStatus = 5;
-   // }
 
     if (gAudioResetStatus != 0) {
-        if (audio_shut_down_and_reset_step() == 0) {
-//            if (gAudioResetStatus == 0) {
-//                AosSendMesg(D_800EA3B4, (OSMesg) (u32) gAudioResetPresetIdToLoad/* OS_MESG_8(gAudioResetPresetIdToLoad) */, OS_MESG_NOBLOCK);
-//            }
-            return;  
+        if (!reset_seen) {
+            ie_audio_voice_reset_all();
+            reset_seen = 1;
         }
+        if (audio_shut_down_and_reset_step() == 0) {
+            return;
+        }
+    } else {
+        reset_seen = 0;
     }
 
-//    if (gThingSent) {
-  //      msg = (u32)gThing;
-    //    gThingSent = 0;
-      //  func_800CBCB0((u32) msg);
-    //}
-
+#ifdef IE_AUDIO_SERVICE
+    /* Service worker: the (start,end) index range arrives in the
+     * OP_AUDIO_PUMP request instead of the OSMesg mailbox (P2.0 audit
+     * condition 1 - the ultra_reimpl queue is not cross-CPU safe). */
+    (void) msg;
+    if (ie_audio_svc_cmd_avail != 0) {
+        ie_audio_svc_cmd_avail = 0;
+        func_800CBCB0(ie_audio_svc_cmd_word);
+    }
+#else
     if (AosRecvMesg(D_800EA3AC, &msg, 0) != -1) {
         func_800CBCB0((u32)msg);
     }
+#endif
 
-    gAudioCmd = gAudioCmdBuffers[gAudioTaskIndex]; 
-    gAudioCmd = synthesis_execute((Acmd*) gAudioCmd, &abiCmdCount, samples, num_samples);
+    ie_audio_voice_frame_begin();
+    for (i = gAudioBufferParameters.updatesPerFrame; i > 0; i--) {
+        s32 updateIndex = gAudioBufferParameters.updatesPerFrame - i;
+        process_sequences(i - 1);
+        synthesis_load_note_subs_eu(updateIndex);
+        ie_audio_voice_update(updateIndex);
+    }
 
     gAudioRandom = osGetCount() * (gAudioRandom + gAudioFrameCount);
 }
@@ -112,21 +143,28 @@ void eu_process_audio_cmd(struct EuAudioCmd* cmd) {
     switch (cmd->u.s.op) {
         case 0x81:
             //printf("preload %08x\n", cmd->u.s.arg2);
+            ie_audio_svc_set_load_active(1);
             preload_sequence(cmd->u.s.arg2, 3);
+            ie_audio_svc_set_load_active(0);
             break;
 
         case 0x82:
         case 0x88:
             //printf("load_sequence %08x %08x\n", cmd->u.s.bankId, cmd->u.s.arg2);
+            ie_audio_svc_set_load_active(1);
             load_sequence(cmd->u.s.bankId, cmd->u.s.arg2);
             //printf("func_800CBA64 %08x %08x\n", cmd->u.s.bankId, cmd->u2.as_s32);
             func_800CBA64(cmd->u.s.bankId, cmd->u2.as_s32);
+            ie_audio_svc_set_load_active(0);
             break;
 
         case 0x83:
             if (gSequencePlayers[cmd->u.s.bankId].enabled != 0) {
                 if (cmd->u2.as_s32 == 0) {
                     //printf("sequence player disable %08x\n", &gSequencePlayers[cmd->u.s.bankId]);
+#ifdef AUDIO_LOAD_TRACE
+                    printf("cmd disable p%d\n", cmd->u.s.bankId);
+#endif
                     sequence_player_disable(&gSequencePlayers[cmd->u.s.bankId]);
                 } else {
                     //printf("seq_player_fade_to_zero_volume %08x %08x\n", cmd->u.s.bankId, cmd->u2.as_s32);
@@ -200,6 +238,11 @@ void func_800CBB48(s32 arg0, s32* arg1) {
     cmd->u.first = arg0;
     //printf("op: %02x\n", cmd->u.s.op);
     cmd->u2.as_u32 = *arg1;
+#if defined(IE_AUDIO_SVC) && !defined(IE_AUDIO_SERVICE)
+    /* The worker consumes this ring cross-CPU: the slot must be fully
+     * written before the producer index moves (P2.0 audit condition 2). */
+    ie_compiler_barrier();
+#endif
     D_800EA3A0[0]++;
 }
 
@@ -236,8 +279,17 @@ void func_800CBC24(void) {
     if (D_800EA4A4 < test) {
         D_800EA4A4 = test;
     }
+#if defined(IE_AUDIO_SVC) || defined(IE_AUDIO_SERVICE)
+    /* Service mode: no mailbox send - the client samples the producer
+     * index directly when it enqueues OP_AUDIO_PUMP. Keep the high-water
+     * bookkeeping above and the consumed-baseline advance below. (The
+     * worker pass never calls this; gated the same to avoid linking the
+     * mailbox reimpl there.) */
+    (void) thing;
+#else
     thing = (OSMesg) ((uint32_t)(D_800EA3A0[0] & 0xFF) | ((uint32_t)(D_800EA3A4[0] & 0xFF) << 8));
     AosSendMesg(D_800EA3AC, thing, 0);
+#endif
     D_800EA3A4[0] = D_800EA3A0[0];
 }
 
@@ -314,6 +366,16 @@ void func_800CBCB0(u32 arg0) {
                             break;
                         case 6:
                             if (cmd->u.s.arg3 < 8) {
+#ifdef AUDIO_LOAD_TRACE
+                                {
+                                    static int iolog;
+                                    if (iolog < 20 && cmd->u2.as_s8 != -1) {
+                                        iolog++;
+                                        printf("chan io write ch %d io[%d]=%d\n",
+                                               cmd->u.s.arg2, cmd->u.s.arg3, cmd->u2.as_s8);
+                                    }
+                                }
+#endif
                                 chan->soundScriptIO[cmd->u.s.arg3] = cmd->u2.as_s8;
                             }
                             break;

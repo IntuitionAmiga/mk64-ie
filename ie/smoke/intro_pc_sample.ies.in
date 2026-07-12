@@ -1,0 +1,92 @@
+-- PC-sampling profile of the course-intro camera pan.
+--
+-- The pan is the first stretch of gGamestate == RACING (before the
+-- countdown), and runs at a few fps - far below the race proper - so
+-- sampling starts the moment the race state appears and runs a fixed
+-- window that the pan dominates. Works against the attract demo race,
+-- so it needs no controller input.
+--
+-- Run:
+--   env IE_NO_IPC=1 IE_M68K_JIT_DISPATCH_HASH=0 \
+--     ../IntuitionEngine/bin/IntuitionEngine -file-root . build/ie/loader.ie68 \
+--     -script build/ie/intro_pc_sample.ies
+
+local STATUS_ADDR = 0x0009F000
+local STATUS_MAGIC = 0x4D4B3634 -- 'MK64'
+local GAMESTATE_ADDR = @GAMESTATE_ADDR@ -- s32 gGamestate; RACING == 4
+
+local RACE_WAIT_TIMEOUT_MS = 480000
+local SAMPLE_WINDOW_MS = 20000
+local SAMPLE_WAIT_MS = 15
+local BUCKET = 1024
+local TOP = 50
+
+local function read_be32(addr)
+    return mem.read8(addr) * 0x1000000 + mem.read8(addr + 1) * 0x10000
+         + mem.read8(addr + 2) * 0x100 + mem.read8(addr + 3)
+end
+
+local function status_sample()
+    local out = {}
+    dbg.open()
+    dbg.freeze()
+    out.status_magic = read_be32(STATUS_ADDR)
+    out.swaps = read_be32(STATUS_ADDR + 16)
+    out.state = read_be32(GAMESTATE_ADDR)
+    dbg.resume()
+    dbg.close()
+    return out
+end
+
+sys.print("INTRO PC SAMPLE: waiting for the demo race to start")
+local deadline = sys.time_ms() + RACE_WAIT_TIMEOUT_MS
+local s = nil
+while sys.time_ms() < deadline do
+    s = status_sample()
+    if s.status_magic == STATUS_MAGIC and s.state == 4 then
+        break
+    end
+    sys.wait_ms(500)
+end
+if s == nil or s.status_magic ~= STATUS_MAGIC or s.state ~= 4 then
+    sys.print("INTRO PC SAMPLE FAIL: race state never reached")
+    sys.exit(1)
+end
+
+local start_swaps = s.swaps
+sys.print(string.format("INTRO PC SAMPLE: race state at swap %d, sampling %ds of intro pan",
+    start_swaps, SAMPLE_WINDOW_MS / 1000))
+
+local buckets = {}
+local taken = 0
+local t0 = sys.time_ms()
+while sys.time_ms() - t0 < SAMPLE_WINDOW_MS do
+    dbg.open()
+    dbg.freeze()
+    local pc = dbg.get_pc()
+    dbg.resume()
+    dbg.close()
+    if pc ~= nil then
+        local b = math.floor(pc / BUCKET) * BUCKET
+        buckets[b] = (buckets[b] or 0) + 1
+        taken = taken + 1
+    end
+    sys.wait_ms(SAMPLE_WAIT_MS)
+end
+
+s = status_sample()
+local sorted = {}
+for addr, count in pairs(buckets) do
+    sorted[#sorted + 1] = { addr = addr, count = count }
+end
+table.sort(sorted, function(a, b) return a.count > b.count end)
+
+sys.print(string.format(
+    "INTRO PC SAMPLE PASS: %d samples, swaps %d -> %d over the window, %d buckets",
+    taken, start_swaps, s.swaps, #sorted))
+for i = 1, math.min(TOP, #sorted) do
+    local e = sorted[i]
+    sys.print(string.format("PC 0x%08X %d (%.1f%%)",
+        e.addr, e.count, e.count * 100.0 / taken))
+end
+sys.exit(0)
